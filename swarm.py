@@ -7,7 +7,7 @@ import functools
 import random
 from functools import partial
 
-from typing import Optional
+from typing import Optional, Callable
 
 import optax
 import ray
@@ -80,31 +80,14 @@ class MemAttention(hk.MultiHeadAttention):
 class ReversibleLayer(object):
     def __init__(
             self,
-            init_scale,
-            num_heads,
-            key_size,
-            mem_vectors,
-            layer,
-            data
+            layer_init: Callable,
+            layer: int,
+            data: jnp.ndarray
     ):
         self.layer = layer
 
         def forward(x):
-            f = MemAttention(
-                num_heads=num_heads,
-                key_size=key_size,
-                w_init_scale=init_scale,
-                name=f'l{layer}_f',
-                mem_vectors=mem_vectors
-            )
-
-            g = MemAttention(
-                num_heads=num_heads,
-                key_size=key_size,
-                w_init_scale=init_scale,
-                name=f'l{layer}_g',
-                mem_vectors=mem_vectors
-            )
+            f, g = layer_init()
 
             hidden = x.shape[-1]
             x1 = x[:, :, :hidden // 2]
@@ -115,21 +98,7 @@ class ReversibleLayer(object):
             return jnp.concatenate((y1, y2), axis=-1)
 
         def reverse(y):
-            f = MemAttention(
-                num_heads=num_heads,
-                key_size=key_size,
-                w_init_scale=init_scale,
-                name=f'l{layer}_f',
-                mem_vectors=mem_vectors
-            )
-
-            g = MemAttention(
-                num_heads=num_heads,
-                key_size=key_size,
-                w_init_scale=init_scale,
-                name=f'l{layer}_g',
-                mem_vectors=mem_vectors
-            )
+            f, g = layer_init()
 
             hidden = y.shape[-1]
             y1 = y[:, :, :hidden // 2]
@@ -191,7 +160,7 @@ class ReversibleLayer(object):
 
 @ray.remote(num_gpus=0.01, num_cpus=0.01)
 class EmbeddingLayer(object):
-    def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation):
+    def __init__(self, obs, vocab: int, d_model: int, optimizer: optax.GradientTransformation):
         self.vocab = vocab
         self.d_model = d_model
 
@@ -213,7 +182,7 @@ class EmbeddingLayer(object):
 
             target_onehot = jax.nn.one_hot(target, vocab)
             loss = -jnp.sum(target_onehot * jax.nn.log_softmax(logits), axis=-1)
-            loss = jnp.sum(loss)
+            loss = jnp.mean(loss)
 
             return loss
 
@@ -238,32 +207,47 @@ class EmbeddingLayer(object):
                 params=params)
 
         @functools.partial(jax.jit)
-        def embed_fwd_fn(x, state):
+        def embed_fwd_fn(obs, state):
             params = state['params']
-            out = self.embed_fwd_fn.apply(params, None, x)
+            out = self.embed_fwd_fn.apply(params, None, obs)
 
             return out
 
         @functools.partial(jax.jit)
-        def debed_fwd_fn(x, state):
+        def embed_grad_fn(obs, y_dy, state):
             params = state['params']
-            out = self.debed_fwd_fn.apply(params, None, x)
+            y, dy = y_dy
+
+            y_new, vjpfun = jax.vjp(self.embed_fwd_fn.apply, params, None, obs)
+            weights_grad, _, _ = vjpfun(dy)
+
+            diff = jnp.square(y - y_new).mean()
+
+            return diff, weights_grad
+
+        @functools.partial(jax.jit)
+        def debed_fwd_fn(target, state):
+            params = state['params']
+            out = self.debed_fwd_fn.apply(params, None, target)
 
             return out
 
         @functools.partial(jax.jit)
-        def debed_grad_fn(x, target, state):
+        def debed_grad_fn(hidden, target, state):
             params = state['params']
 
-            _, vjpfun = jax.vjp(self.debed_loss_fn.apply, params, None, x, target)
-            weights_grad, _, x_grad, _ = vjpfun(np.ones((), dtype=x.dtype))
+            loss, vjpfun = jax.vjp(self.debed_loss_fn.apply, params, None, hidden, target)
+            weights_grad, _, x_grad, _ = vjpfun(np.ones((), dtype=hidden.dtype))
 
-            return x, x_grad, weights_grad
+            return hidden, x_grad, loss, weights_grad
 
         # we call all the functions here to trigger jit at init
-        self.state = init_fn(master_rng, data)
+        self.state = init_fn(master_rng, obs)
         self.embed_fwd_partial = partial(embed_fwd_fn, state=self.state)
-        e = self.embed_fwd_partial(data)
+        e = self.embed_fwd_partial(obs)
+
+        self.embed_grad_partial = partial(embed_grad_fn, state=self.state)
+        self.embed_grad_partial(obs, (e, e))
 
         self.debed_fwd_partial = partial(debed_fwd_fn, state=self.state)
         self.debed_fwd_partial(e)
@@ -274,11 +258,17 @@ class EmbeddingLayer(object):
     def embed_forward(self, obs):
         return self.embed_fwd_partial(obs)
 
+    def embed_grad(self, obs, y_dy):
+        return self.embed_grad_partial(obs, y_dy)[:1]
+
     def debed_forward(self, h):
         return self.debed_fwd_partial(h)
 
+    @ray.method(num_returns=2)
     def debed_grad(self, h, targets):
-        return self.debed_grad_partial(h, targets)[:2]
+        hidden, x_grad, loss, weights_grad = self.debed_grad_partial(h, targets)
+
+        return (hidden, x_grad), loss
 
     def __repr__(self):
         return "EmbeddingLayer"
@@ -299,7 +289,25 @@ embedding = embedding_actor.embed_forward.remote(data["obs"])
 layers = []
 
 for i in range(6):
-    layers.append(ReversibleLayer.remote(2/6, 4, 32, 512, i, embedding))
+    def layer_init():
+        f = MemAttention(
+            num_heads=4,
+            key_size=32,
+            w_init_scale=2/6,
+            name=f'l{i}_f',
+            mem_vectors=512
+        )
+
+        g = MemAttention(
+            num_heads=4,
+            key_size=32,
+            w_init_scale=2/6,
+            name=f'l{i}_g',
+            mem_vectors=512
+        )
+
+        return f, g
+    layers.append(ReversibleLayer.remote(layer_init, i, embedding))
 
 dbg = True
 
@@ -316,13 +324,15 @@ while True:
         if dbg:
             fwd_activations.append(x)
         x = l.forward.remote(x)
-    y_dy = embedding_actor.debed_grad.remote(x, data["target"])
+
+    y_dy, loss = embedding_actor.debed_grad.remote(x, data["target"])
 
     for l in reversed(layers):
         y_dy = l.backward.remote(y_dy)
         if dbg:
             bwd_activations.append(y_dy)
-        pass
+
+    error = embedding_actor.embed_grad.remote(data["obs"], y_dy)
 
     if dbg:
         fwd_activations = ray.get(fwd_activations)
