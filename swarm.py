@@ -1,3 +1,4 @@
+import operator
 import os
 
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/opt/cuda-10.1"
@@ -18,6 +19,12 @@ import numpy as np
 
 from loader import TextLoader
 
+def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
+    """Apply a unique LayerNorm to x with default settings."""
+    return hk.LayerNorm(axis=-1,
+                        create_scale=True,
+                        create_offset=True,
+                        name=name)(x)
 
 class MemAttention(hk.MultiHeadAttention):
     """Self attention with a causal mask applied and persistant vectors."""
@@ -35,6 +42,8 @@ class MemAttention(hk.MultiHeadAttention):
             value: Optional[jnp.ndarray] = None,
             mask: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
+        query = layer_norm(query)
+
         key = key if key is not None else query
         value = value if value is not None else query
 
@@ -82,7 +91,8 @@ class ReversibleLayer(object):
             self,
             layer_init: Callable,
             layer: int,
-            data: jnp.ndarray
+            data: jnp.ndarray,
+            optimizer: optax.GradientTransformation
     ):
         self.layer = layer
 
@@ -108,6 +118,20 @@ class ReversibleLayer(object):
             x1 = y1 - f(x2)
             return jnp.concatenate((x1, x2), axis=-1)
 
+        @functools.partial(jax.jit)
+        def opt(state):
+            def grad_to_cpu(x):
+                return jax.device_put(x, device=jax.devices("cpu")) / state['grad_count']
+
+            grad_cpu = jax.tree_map(grad_to_cpu, state['grad_acc'])
+
+            updates, opt_state = optimizer.update(grad_cpu, state['opt_state'])
+            state['params'] = optax.apply_updates(state['params'], updates)
+
+            state['grad_acc'] = jax.tree_map(jnp.zeros_like, state['grad_acc'])
+            state['grad_count'] = np.array(0)
+            return state
+
         self.forward_fn = hk.transform(forward)
         self.reverse_fn = hk.transform(reverse)
 
@@ -125,6 +149,8 @@ class ReversibleLayer(object):
                 step=np.array(0),
                 rng=out_rng,
                 opt_state=opt_state,
+                grad_acc=jax.tree_map(jnp.zeros_like, params),
+                grad_count=np.array(0),
                 params=params)
 
         @functools.partial(jax.jit)
@@ -136,26 +162,38 @@ class ReversibleLayer(object):
         @functools.partial(jax.jit)
         def reverse_fn(y_dy, state):
             params = state['params']
+            acc = state['grad_acc']
 
             y, dy = y_dy
             reconstr_x = self.reverse_fn.apply(params, None, y)
 
             _, vjpfun = jax.vjp(self.forward_fn.apply, params, None, reconstr_x)
-            weight_grad, _, x_grad = vjpfun(dy)
-            return reconstr_x, x_grad
+            weights_grad, _, x_grad = vjpfun(dy)
+
+            state['grad_acc'] = jax.tree_multimap(operator.add, acc, weights_grad)
+            state['grad_count'] = state['grad_count'] + 1
+            return (reconstr_x, x_grad), state
 
         self.state = init_fn(master_rng, data)
-        self.forward_partial = partial(forward_fn, state=self.state)
-        self.forward_partial(data)
+        self.forward = forward_fn
+        self.forward(data, self.state)
 
-        self.reverse_partial = partial(reverse_fn, state=self.state)
-        self.reverse_partial((data, jnp.zeros_like(data)))
+        self.reverse = reverse_fn
+        self.reverse((data, jnp.zeros_like(data)), self.state)
+
+        self.opt = opt
+        self.opt(self.state)
 
     def forward(self, h):
-        return self.forward_partial(h)
+        return self.forward(h, self.state)
 
     def backward(self, y_dy):
-        return self.reverse_partial(y_dy)
+        x_dx, new_state = self.reverse(y_dy, self.state)
+        self.state = new_state
+        return x_dx
+
+    def opt(self):
+        self.state = self.opt(self.state)
 
 
 @ray.remote(num_gpus=0.01, num_cpus=0.01)
@@ -186,6 +224,20 @@ class EmbeddingLayer(object):
 
             return loss
 
+        @functools.partial(jax.jit)
+        def opt(state):
+            def grad_to_cpu(x):
+                return jax.device_put(x, device=jax.devices("cpu")) / state['grad_count']
+
+            grad_cpu = jax.tree_map(grad_to_cpu, state['grad_acc'])
+
+            updates, opt_state = optimizer.update(grad_cpu, state['opt_state'])
+            state['params'] = optax.apply_updates(state['params'], updates)
+
+            state['grad_acc'] = jax.tree_map(jnp.zeros_like, state['grad_acc'])
+            state['grad_count'] = np.array(0)
+            return state
+
         self.embed_fwd_fn = hk.transform(embed_forward)
         self.debed_fwd_fn = hk.transform(debed_forward)
         self.debed_loss_fn = hk.transform(debed_loss)
@@ -204,6 +256,8 @@ class EmbeddingLayer(object):
                 step=np.array(0),
                 rng=out_rng,
                 opt_state=opt_state,
+                grad_acc=jax.tree_map(jnp.zeros_like, params),
+                grad_count=np.array(0),
                 params=params)
 
         @functools.partial(jax.jit)
@@ -216,6 +270,8 @@ class EmbeddingLayer(object):
         @functools.partial(jax.jit)
         def embed_grad_fn(obs, y_dy, state):
             params = state['params']
+            acc = state['grad_acc']
+
             y, dy = y_dy
 
             y_new, vjpfun = jax.vjp(self.embed_fwd_fn.apply, params, None, obs)
@@ -223,7 +279,10 @@ class EmbeddingLayer(object):
 
             diff = jnp.square(y - y_new).mean()
 
-            return diff, weights_grad
+            state['grad_acc'] = jax.tree_multimap(operator.add, acc, weights_grad)
+            state['grad_count'] = state['grad_count'] + 1
+
+            return diff, state
 
         @functools.partial(jax.jit)
         def debed_fwd_fn(target, state):
@@ -235,40 +294,54 @@ class EmbeddingLayer(object):
         @functools.partial(jax.jit)
         def debed_grad_fn(hidden, target, state):
             params = state['params']
+            acc = state['grad_acc']
 
             loss, vjpfun = jax.vjp(self.debed_loss_fn.apply, params, None, hidden, target)
             weights_grad, _, x_grad, _ = vjpfun(np.ones((), dtype=hidden.dtype))
 
-            return hidden, x_grad, loss, weights_grad
+            state['grad_acc'] = jax.tree_multimap(operator.add, acc, weights_grad)
+            state['grad_count'] = state['grad_count'] + 1
+
+            return hidden, x_grad, loss, state
 
         # we call all the functions here to trigger jit at init
         self.state = init_fn(master_rng, obs)
-        self.embed_fwd_partial = partial(embed_fwd_fn, state=self.state)
-        e = self.embed_fwd_partial(obs)
+        self.embed_fwd = embed_fwd_fn
+        e = self.embed_fwd(obs, self.state)
 
-        self.embed_grad_partial = partial(embed_grad_fn, state=self.state)
-        self.embed_grad_partial(obs, (e, e))
+        self.embed_grad = embed_grad_fn
+        self.embed_grad(obs, (e, e), self.state)
 
-        self.debed_fwd_partial = partial(debed_fwd_fn, state=self.state)
-        self.debed_fwd_partial(e)
+        self.debed_fwd = debed_fwd_fn
+        self.debed_fwd(e, self.state)
 
-        self.debed_grad_partial = partial(debed_grad_fn, state=self.state)
-        self.debed_grad_partial(e, np.ones_like(e).mean(axis=-1))
+        self.debed_grad = debed_grad_fn
+        self.debed_grad(e, np.ones_like(e).mean(axis=-1), self.state)
 
+        self.opt = opt
+        self.opt(self.state)
+        
     def embed_forward(self, obs):
-        return self.embed_fwd_partial(obs)
+        return self.embed_fwd(obs, self.state)
 
     def embed_grad(self, obs, y_dy):
-        return self.embed_grad_partial(obs, y_dy)[:1]
+        diff, state = self.embed_grad(obs, y_dy, self.state)
+        self.state = state
+
+        return diff
 
     def debed_forward(self, h):
-        return self.debed_fwd_partial(h)
+        return self.debed_fwd(h, self.state)
 
     @ray.method(num_returns=2)
     def debed_grad(self, h, targets):
-        hidden, x_grad, loss, weights_grad = self.debed_grad_partial(h, targets)
+        hidden, x_grad, loss, state = self.debed_grad(h, targets, self.state)
+        self.state = state
 
         return (hidden, x_grad), loss
+
+    def opt(self):
+        self.state = self.opt(self.state)
 
     def __repr__(self):
         return "EmbeddingLayer"
@@ -288,12 +361,12 @@ embedding = embedding_actor.embed_forward.remote(data["obs"])
 
 layers = []
 
-for i in range(6):
+for i in range(12):
     def layer_init():
         f = MemAttention(
             num_heads=4,
             key_size=32,
-            w_init_scale=2/6,
+            w_init_scale=2/12,
             name=f'l{i}_f',
             mem_vectors=512
         )
@@ -301,20 +374,21 @@ for i in range(6):
         g = MemAttention(
             num_heads=4,
             key_size=32,
-            w_init_scale=2/6,
+            w_init_scale=2/12,
             name=f'l{i}_g',
             mem_vectors=512
         )
 
         return f, g
-    layers.append(ReversibleLayer.remote(layer_init, i, embedding))
+    layers.append(ReversibleLayer.remote(layer_init, i, embedding, optimizer))
 
-dbg = True
+dbg = False
 
-while True:
+def train_sample():
     data = train_dataset.get_samples()
 
     x = embedding_actor.embed_forward.remote(data["obs"])
+    ray.wait([x])
 
     if dbg:
         fwd_activations = []
@@ -324,15 +398,28 @@ while True:
         if dbg:
             fwd_activations.append(x)
         x = l.forward.remote(x)
+        ray.wait([x])
 
     y_dy, loss = embedding_actor.debed_grad.remote(x, data["target"])
+    ray.wait([y_dy])
 
     for l in reversed(layers):
         y_dy = l.backward.remote(y_dy)
+        ray.wait([y_dy])
         if dbg:
             bwd_activations.append(y_dy)
 
     error = embedding_actor.embed_grad.remote(data["obs"], y_dy)
+    ray.wait([error])
+
+    print(ray.get(loss))
+
+    opts = [embedding_actor.opt.remote()]
+
+    for l in layers:
+        opts.append(l.opt.remote())
+
+    ray.wait(opts, num_returns=len(opts))
 
     if dbg:
         fwd_activations = ray.get(fwd_activations)
@@ -344,6 +431,7 @@ while True:
         for f, b in zip(fwd_activations, bwd_activations):
             assert jnp.allclose(f, b, rtol=1e-4, atol=1e-4)
 
-    pass
+while True:
+    train_sample()
 
 ray.shutdown()

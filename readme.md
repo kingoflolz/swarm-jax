@@ -8,7 +8,9 @@ Designed for training large language models in a model parallel fashion with unr
 
 - [x] Forward passes
 - [x] Backward passes with activation reconstruction
-- [ ] Run optimizer
+- [x] Run optimizer
+- [ ] Logging
+- [ ] Checkpointing
 - [ ] Data parallelism with multiple nodes per layer and gradient/weight aggregation
 - [ ] Heterogeneous nodes with potentially multiple layers per node
 - [ ] Handle unbalanced and unreliable nodes (layerdrop)
