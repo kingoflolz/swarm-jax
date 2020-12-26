@@ -11,7 +11,7 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint
+from swarm_layer import save_checkpoint, load_checkpoint, opt, opt_state
 
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
@@ -27,6 +27,7 @@ class EmbeddingLayer(object):
     def __init__(self, obs, vocab: int, d_model: int, optimizer: optax.GradientTransformation):
         self.vocab = vocab
         self.d_model = d_model
+        self.optimizer = optimizer
 
         def embed_forward(x):
             embed_init = hk.initializers.TruncatedNormal(stddev=0.02)
@@ -37,21 +38,6 @@ class EmbeddingLayer(object):
             o = hk.Embed(vocab, d_model, w_init=embed_init, name="embedding")(x) + positional_embeddings
 
             return o
-
-        @functools.partial(jax.jit)
-        def opt(state):
-            def grad_to_cpu(x):
-                return jax.device_put(x, device=jax.devices("cpu")) / state['grad_count']
-
-            # grad_cpu = jax.tree_map(grad_to_cpu, state['grad_acc'])
-
-            updates, opt_state = optimizer.update(state['grad_acc'], state['opt_state'])
-            state['params'] = optax.apply_updates(state['params'], updates)
-            state['opt_state'] = opt_state
-
-            state['grad_acc'] = jax.tree_map(jnp.zeros_like, state['grad_acc'])
-            state['grad_count'] = np.array(0)
-            return state
 
         self.embed_fwd_fn = hk.transform(embed_forward)
 
@@ -109,9 +95,7 @@ class EmbeddingLayer(object):
         self.embed_grad = embed_grad_fn
         self.embed_grad(obs, (e, e), self.state)
 
-        self.opt = opt
-        self.opt(self.state)
-
+        self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, obs)
 
     def embed_forward(self, obs):
@@ -124,7 +108,7 @@ class EmbeddingLayer(object):
         return diff
 
     def opt(self):
-        self.state = self.opt(self.state)
+        self.state = opt_state(self.state, self.optimizer)
 
     def get_params(self):
         return self.state["params"]
@@ -148,6 +132,7 @@ class ProjLayer(object):
     def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation):
         self.vocab = vocab
         self.d_model = d_model
+        self.optimizer = optimizer
 
         def debed_forward(x):
             x = layer_norm(x)
@@ -164,21 +149,6 @@ class ProjLayer(object):
             loss = jnp.mean(loss)
 
             return loss
-
-        @functools.partial(jax.jit)
-        def opt(state):
-            def grad_to_cpu(x):
-                return jax.device_put(x, device=jax.devices("cpu")) / state['grad_count']
-
-            # grad_cpu = jax.tree_map(grad_to_cpu, state['grad_acc'])
-
-            updates, opt_state = optimizer.update(state['grad_acc'], state['opt_state'])
-            state['params'] = optax.apply_updates(state['params'], updates)
-            state['opt_state'] = opt_state
-
-            state['grad_acc'] = jax.tree_map(jnp.zeros_like, state['grad_acc'])
-            state['grad_count'] = np.array(0)
-            return state
 
         self.proj_fwd_fn = hk.transform(debed_forward)
         self.proj_loss_fn = hk.transform(debed_loss)
@@ -233,9 +203,7 @@ class ProjLayer(object):
         self.debed_grad = debed_grad_fn
         self.debed_grad(data, np.ones_like(data).mean(axis=-1), self.state)
 
-        self.opt = opt
-        self.opt(self.state)
-
+        self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, data)
 
     def debed_forward(self, h):
@@ -249,7 +217,7 @@ class ProjLayer(object):
         return (hidden, x_grad), loss
 
     def opt(self):
-        self.state = self.opt(self.state)
+        self.state = opt_state(self.state, self.optimizer)
 
     def get_params(self):
         return self.state["params"]

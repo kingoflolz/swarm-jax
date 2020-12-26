@@ -11,7 +11,7 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint
+from swarm_layer import save_checkpoint, load_checkpoint, opt_state
 
 
 @ray.remote(num_gpus=0.01, num_cpus=0.01)
@@ -24,6 +24,7 @@ class ReversibleLayer(object):
             optimizer: optax.GradientTransformation
     ):
         self.layer = layer
+        self.optimizer = optimizer
 
         def forward(x):
             f, g = layer_init(layer)
@@ -51,21 +52,6 @@ class ReversibleLayer(object):
             x1 = y1 - f(x2)
 
             return jnp.concatenate((x1, x2), axis=-1)
-
-        @functools.partial(jax.jit)
-        def opt(state):
-            def grad_to_cpu(x):
-                return jax.device_put(x, device=jax.devices("cpu")) / state['grad_count']
-
-            # grad_cpu = jax.tree_map(grad_to_cpu, state['grad_acc'])
-
-            updates, opt_state = optimizer.update(state['grad_acc'], state['opt_state'])
-            state['params'] = optax.apply_updates(state['params'], updates)
-            state['opt_state'] = opt_state
-
-            state['grad_acc'] = jax.tree_map(jnp.zeros_like, state['grad_acc'])
-            state['grad_count'] = np.array(0)
-            return state
 
         self.forward_fn = hk.transform(forward)
         self.reverse_fn = hk.transform(reverse)
@@ -118,9 +104,7 @@ class ReversibleLayer(object):
         self.reverse = reverse_fn
         self.reverse((data, jnp.zeros_like(data)), self.state)
 
-        self.opt = opt
-        self.opt(self.state)
-
+        self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, data)
 
     def forward(self, h):
@@ -132,7 +116,7 @@ class ReversibleLayer(object):
         return x_dx
 
     def opt(self):
-        self.state = self.opt(self.state)
+        self.state = opt_state(self.state, self.optimizer)
 
     def get_params(self):
         return self.state["params"]
