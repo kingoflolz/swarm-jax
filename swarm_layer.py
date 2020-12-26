@@ -2,6 +2,7 @@
 Common methods for layer actors
 """
 import functools
+import operator
 import pickle
 import re
 from glob import glob
@@ -34,7 +35,7 @@ def load_checkpoint(path):
 
 
 @functools.partial(jax.jit, donate_argnums=(0, 1, 2), static_argnums=3)
-def opt(grad_acc, opt_state, params, optimizer):
+def opt_jit(grad_acc, opt_state, params, optimizer):
     updates, new_opt_state = optimizer.update(grad_acc, opt_state)
     new_params = optax.apply_updates(params, updates)
 
@@ -43,7 +44,7 @@ def opt(grad_acc, opt_state, params, optimizer):
 
 
 def opt_state(state, optimizer):
-    new_grad_acc, new_opt_state, new_params = opt(state["grad_acc"],
+    new_grad_acc, new_opt_state, new_params = opt_jit(state["grad_acc"],
                                                   state["opt_state"],
                                                   state["params"],
                                                   optimizer)

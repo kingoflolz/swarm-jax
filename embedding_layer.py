@@ -11,7 +11,7 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint, opt, opt_state
+from swarm_layer import save_checkpoint, load_checkpoint, opt_state
 
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
@@ -66,22 +66,16 @@ class EmbeddingLayer(object):
 
             return out
 
-        @functools.partial(jax.jit)
-        def embed_grad_fn(obs, y_dy, state):
-            params = state['params']
-            acc = state['grad_acc']
-
+        @functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+        def embed_grad_fn(obs, y_dy, acc, params):
             y, dy = y_dy
 
             y_new, vjpfun = jax.vjp(self.embed_fwd_fn.apply, params, None, obs)
             weights_grad, _, _ = vjpfun(dy)
-
             diff = jnp.square(y - y_new).mean()
 
-            state['grad_acc'] = jax.tree_multimap(operator.add, acc, weights_grad)
-            state['grad_count'] = state['grad_count'] + 0.5
-
-            return diff, state
+            new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
+            return diff, new_acc
 
         # we call all the functions here to trigger jit at init
         self.state = init_fn(master_rng, obs)
@@ -93,7 +87,8 @@ class EmbeddingLayer(object):
         e = self.embed_fwd(obs, self.state)
 
         self.embed_grad = embed_grad_fn
-        self.embed_grad(obs, (e, e), self.state)
+        _, new_acc = self.embed_grad(obs, (e, e), self.state["grad_acc"], self.state["params"])
+        self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, obs)
@@ -102,8 +97,9 @@ class EmbeddingLayer(object):
         return self.embed_fwd(obs, self.state)
 
     def embed_grad(self, obs, y_dy):
-        diff, state = self.embed_grad(obs, ray.get(y_dy[0]), self.state)
-        self.state = state
+        diff, new_grad_acc = self.embed_grad(obs, ray.get(y_dy[0]), self.state["grad_acc"], self.state["params"])
+        self.state["grad_acc"] = new_grad_acc
+        self.state["grad_count"] = self.state["grad_count"] + 1
 
         return diff
 
@@ -178,18 +174,14 @@ class ProjLayer(object):
 
             return out
 
-        @functools.partial(jax.jit)
-        def debed_grad_fn(hidden, target, state):
-            params = state['params']
-            acc = state['grad_acc']
+        @functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+        def debed_grad_fn(hidden, target, acc, params):
 
             loss, vjpfun = jax.vjp(self.proj_loss_fn.apply, params, None, hidden, target)
             weights_grad, _, x_grad, _ = vjpfun(np.ones((), dtype=hidden.dtype))
 
-            state['grad_acc'] = jax.tree_multimap(operator.add, acc, weights_grad)
-            state['grad_count'] = state['grad_count'] + 1
-
-            return hidden, x_grad, loss, state
+            new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
+            return hidden, x_grad, loss, new_acc
 
         # we call all the functions here to trigger jit at init
         self.state = init_fn(master_rng, data)
@@ -201,7 +193,8 @@ class ProjLayer(object):
         self.debed_fwd(data, self.state)
 
         self.debed_grad = debed_grad_fn
-        self.debed_grad(data, np.ones_like(data).mean(axis=-1), self.state)
+        _, _, _, new_acc = self.debed_grad(data, np.ones_like(data).mean(axis=-1), self.state["grad_acc"], self.state["params"])
+        self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, data)
@@ -211,8 +204,9 @@ class ProjLayer(object):
 
     @ray.method(num_returns=2)
     def debed_grad(self, h, targets):
-        hidden, x_grad, loss, state = self.debed_grad(ray.get(h[0]), targets, self.state)
-        self.state = state
+        hidden, x_grad, loss, new_acc = self.debed_grad(ray.get(h[0]), targets, self.state["grad_acc"], self.state["params"])
+        self.state["grad_acc"] = new_acc
+        self.state["grad_count"] = self.state["grad_count"] + 1
 
         return (hidden, x_grad), loss
 

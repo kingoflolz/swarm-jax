@@ -71,28 +71,25 @@ class ReversibleLayer(object):
                 rng=out_rng,
                 opt_state=opt_state,
                 grad_acc=jax.tree_map(jnp.zeros_like, params),
-                grad_count=np.array(0),
+                grad_count=np.array(1),
                 params=params)
 
-        @functools.partial(jax.jit)
+        @functools.partial(jax.jit, donate_argnums=0)
         def forward_fn(x, state):
             params = state['params']
             out = self.forward_fn.apply(params, None, x)
             return out
 
-        @functools.partial(jax.jit)
-        def reverse_fn(y_dy, state):
-            params = state['params']
-
+        @functools.partial(jax.jit, donate_argnums=(0, 1))
+        def reverse_fn(y_dy, acc, params):
             y, dy = y_dy
             reconstr_x = self.reverse_fn.apply(params, None, y)
 
             _, vjpfun = jax.vjp(self.forward_fn.apply, params, None, reconstr_x)
             weights_grad, _, x_grad = vjpfun(dy)
 
-            state['grad_acc'] = jax.tree_multimap(operator.add, state['grad_acc'], weights_grad)
-            state['grad_count'] = state['grad_count'] + 1
-            return (reconstr_x, x_grad), state
+            new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
+            return (reconstr_x, x_grad), new_acc
 
         self.state = init_fn(master_rng, data)
         num_params = hk.data_structures.tree_size(self.state["params"])
@@ -102,7 +99,8 @@ class ReversibleLayer(object):
         self.forward(data, self.state)
 
         self.reverse = reverse_fn
-        self.reverse((data, jnp.zeros_like(data)), self.state)
+        _, new_acc = self.reverse((data, jnp.zeros_like(data)), self.state["grad_acc"], self.state["params"])
+        self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, data)
@@ -111,8 +109,9 @@ class ReversibleLayer(object):
         return self.forward(ray.get(h[0]), self.state)
 
     def backward(self, y_dy):
-        x_dx, new_state = self.reverse(ray.get(y_dy[0]), self.state)
-        self.state = new_state
+        x_dx, new_acc = self.reverse(ray.get(y_dy[0]), self.state["grad_acc"], self.state["params"])
+        self.state["grad_acc"] = new_acc
+        self.state["grad_count"] = self.state["grad_count"] + 1
         return x_dx
 
     def opt(self):
