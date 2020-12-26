@@ -124,10 +124,10 @@ class ReversibleLayer(object):
         self.state = init_fn(master_rng, data)
 
     def forward(self, h):
-        return self.forward(h, self.state)
+        return self.forward(ray.get(h[0]), self.state)
 
     def backward(self, y_dy):
-        x_dx, new_state = self.reverse(y_dy, self.state)
+        x_dx, new_state = self.reverse(ray.get(y_dy[0]), self.state)
         self.state = new_state
         return x_dx
 

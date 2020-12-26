@@ -4,7 +4,7 @@ import optax
 import ray
 from tensorboardX import SummaryWriter
 
-from embedding_layer import EmbeddingLayer
+from embedding_layer import EmbeddingLayer, ProjLayer
 from model import SwarmModel
 from reversible_layer import ReversibleLayer
 
@@ -26,11 +26,13 @@ class Swarm:
 
         x = self.embedding.embed_forward.remote(example["obs"])
 
+        self.proj = ProjLayer.remote(x, self.model.vocab, self.model.d_model, self.optimizer)
+
         self.layers = []
         for i in range(model.rev_layers):
             self.layers.append(ReversibleLayer.remote(self.model.rev_init, i, x, optimizer))
 
-        self.all_layers = [self.embedding] + self.layers
+        self.all_layers = [self.embedding] + self.layers + [self.proj]
 
     def run(self, epochs, log_path, ckpt_path):
         assert ray.is_initialized()  # needs a valid ray cluster
@@ -42,7 +44,9 @@ class Swarm:
         for e in range(epochs):
             if e % 1000 == 0:
                 ckpt_saves = [layer.save.remote(f"{ckpt_path}/{i}/", e) for i, layer in enumerate(self.all_layers)]
-                print(f"checkpoint save status: {ray.get(ckpt_saves)}")
+                ray.wait(ckpt_saves, num_returns=len(ckpt_saves))
+
+                print(f"checkpoint saved")
 
             data = self.dataloader()
 
@@ -52,25 +56,27 @@ class Swarm:
             ray.wait(opts, num_returns=len(opts))
 
             writer.add_scalar("loss", loss, e)
-            writer.add_scalar("error", error, e)
+            writer.add_scalar("reconstruction_error", error, e)
+
 
 # take a training example and shoves it through forward and backward of all layers
 def drive_example(swarm: Swarm, data):
     x = swarm.embedding.embed_forward.remote(data["obs"])
     ray.wait([x])
 
+    # wrap all big ray objects in unit tuples to stop implicit .get
     for l in swarm.layers:
-        x = l.forward.remote(x)
+        x = l.forward.remote((x,))
         ray.wait([x])
 
-    y_dy, loss = swarm.embedding.debed_grad.remote(x, data["target"])
+    y_dy, loss = swarm.proj.debed_grad.remote((x,), data["target"])
     ray.wait([y_dy])
 
     for l in reversed(swarm.layers):
-        y_dy = l.backward.remote(y_dy)
+        y_dy = l.backward.remote((y_dy,))
         ray.wait([y_dy])
 
-    error = swarm.embedding.embed_grad.remote(data["obs"], y_dy)
+    error = swarm.embedding.embed_grad.remote(data["obs"], (y_dy,))
     ray.wait([error])
 
     return ray.get(error), ray.get(loss)

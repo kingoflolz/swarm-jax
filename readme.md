@@ -13,7 +13,9 @@ Look in `swarm_run.py` for an example of running a character transformer on enwi
 - [x] Run optimizer
 - [x] Logging
 - [x] Checkpointing
+- [ ] Actually do pipelining
 - [ ] Data parallelism with multiple nodes per layer and gradient/weight aggregation
 - [ ] Heterogeneous nodes with potentially multiple layers per node
 - [ ] Handle unbalanced and unreliable nodes (layerdrop)
+- [ ] Dynamic node addition
 - [ ] 1T or bust?
