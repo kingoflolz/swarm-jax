@@ -2,6 +2,7 @@ import functools
 import operator
 import random
 from functools import partial
+from queue import Queue
 from typing import Callable
 
 import haiku as hk
@@ -11,7 +12,7 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint, opt_state
+from swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function
 
 
 @ray.remote(num_gpus=0.01, num_cpus=0.01)
@@ -105,14 +106,26 @@ class ReversibleLayer(object):
         self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, data)
 
+    def run(self):
+        def forward(h):
+            return self.forward(h, self.state)
+
+        def backward(y_dy):
+            x_dx, new_acc = self.reverse(y_dy, self.state["grad_acc"], self.state["params"])
+            self.state["grad_acc"] = new_acc
+            self.state["grad_count"] = self.state["grad_count"] + 1
+            return x_dx
+
+        self.fwd_q = Queue(2)
+        self.bwd_q = Queue(2)
+
+        run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
+
     def forward(self, h):
-        return self.forward(ray.get(h[0]), self.state)
+        return run_function(self.fwd_q, h)
 
     def backward(self, y_dy):
-        x_dx, new_acc = self.reverse(ray.get(y_dy[0]), self.state["grad_acc"], self.state["params"])
-        self.state["grad_acc"] = new_acc
-        self.state["grad_count"] = self.state["grad_count"] + 1
-        return x_dx
+        return run_function(self.bwd_q, y_dy)
 
     def opt(self):
         self.state = opt_state(self.state, self.optimizer)

@@ -30,7 +30,10 @@ class Swarm:
 
         self.layers = []
         for i in range(model.rev_layers):
-            self.layers.append(ReversibleLayer.remote(self.model.rev_init, i, x, optimizer))
+            self.layers.append(ReversibleLayer.options(max_concurrency=8).remote(self.model.rev_init, i, x, optimizer))
+
+        for l in self.layers:
+            l.run.remote()
 
         self.all_layers = [self.embedding] + self.layers + [self.proj]
 

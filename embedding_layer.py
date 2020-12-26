@@ -66,7 +66,7 @@ class EmbeddingLayer(object):
 
             return out
 
-        @functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+        @functools.partial(jax.jit, donate_argnums=(1, 2))
         def embed_grad_fn(obs, y_dy, acc, params):
             y, dy = y_dy
 
@@ -174,7 +174,7 @@ class ProjLayer(object):
 
             return out
 
-        @functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+        @functools.partial(jax.jit, donate_argnums=(0, 2))
         def debed_grad_fn(hidden, target, acc, params):
 
             loss, vjpfun = jax.vjp(self.proj_loss_fn.apply, params, None, hidden, target)
