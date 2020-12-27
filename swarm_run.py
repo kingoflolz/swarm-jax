@@ -21,6 +21,6 @@ optimizer = optax.chain(
 
 model = SwarmCharTransformer
 swarm = Swarm(model, optimizer, train_dataset.get_samples)
-swarm.run(100000, "runs/512_swarm", "ckpt/512_swarm")
+swarm.run(100000, "runs/512_swarm_thread", "ckpt/512_swarm_thread")
 
 ray.shutdown()

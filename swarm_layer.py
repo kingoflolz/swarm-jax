@@ -2,7 +2,6 @@
 Common methods for layer actors
 """
 import functools
-import operator
 import pickle
 import re
 from glob import glob
@@ -12,10 +11,9 @@ from threading import Thread
 from typing import Callable
 
 import jax
-import optax
 import jax.numpy as jnp
 import numpy as np
-
+import optax
 # TODO: more intellegent checkpoint saving with deleting old checkpoints etc
 import ray
 
@@ -74,8 +72,11 @@ class GetThread(Thread):
         while True:
             ret_q, obj_id, *aux = self.i_q.get()
 
-            # GIL released here
-            o = ray.get(obj_id)
+            if isinstance(obj_id, ray.ObjectID):
+                # GIL released here
+                o = ray.get(obj_id)
+            else:
+                o = obj_id
 
             self.o_q.put((ret_q, o, *aux))
 
@@ -142,5 +143,9 @@ def function_wrapper(fun):
 def run_function(q: Queue, obj_id, *aux):
     ret_q = Queue(1)
 
-    q.put((ret_q, obj_id[0], *aux))
+    if isinstance(obj_id, tuple):
+        q.put((ret_q, obj_id[0], *aux))
+    else:
+        q.put((ret_q, obj_id, *aux))
+
     return ret_q.get()

@@ -1,6 +1,7 @@
 import functools
 import operator
 import random
+import time
 from functools import partial
 from queue import Queue
 from typing import Callable
@@ -106,6 +107,8 @@ class ReversibleLayer(object):
         self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, data)
 
+        self.init = False
+
     def run(self):
         def forward(h):
             return self.forward(h, self.state)
@@ -118,13 +121,18 @@ class ReversibleLayer(object):
 
         self.fwd_q = Queue(2)
         self.bwd_q = Queue(2)
+        self.init = True
 
         run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
 
     def forward(self, h):
+        while not self.init:
+            time.sleep(0.1)
         return run_function(self.fwd_q, h)
 
     def backward(self, y_dy):
+        while not self.init:
+            time.sleep(0.1)
         return run_function(self.bwd_q, y_dy)
 
     def opt(self):

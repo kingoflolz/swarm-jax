@@ -1,5 +1,7 @@
+from multiprocessing.pool import ThreadPool
 from typing import Callable
 
+import numpy as np
 import optax
 import ray
 from tensorboardX import SummaryWriter
@@ -22,11 +24,14 @@ class Swarm:
         assert ray.is_initialized()  # needs a valid ray cluster to start
 
         example = self.dataloader()
-        self.embedding = EmbeddingLayer.remote(example["obs"], self.model.vocab, self.model.d_model, self.optimizer)
+        self.embedding = EmbeddingLayer.options(max_concurrency=8).remote(example["obs"], self.model.vocab,
+                                                                          self.model.d_model, self.optimizer)
+        self.embedding.run.remote()
 
         x = self.embedding.embed_forward.remote(example["obs"])
 
-        self.proj = ProjLayer.remote(x, self.model.vocab, self.model.d_model, self.optimizer)
+        self.proj = ProjLayer.options(max_concurrency=8).remote(x, self.model.vocab, self.model.d_model, self.optimizer)
+        self.proj.run.remote()
 
         self.layers = []
         for i in range(model.rev_layers):
@@ -44,6 +49,8 @@ class Swarm:
         ckpt_loads = [layer.load.remote(f"{ckpt_path}/{i}/") for i, layer in enumerate(self.all_layers)]
         print(f"checkpoint load status: {ray.get(ckpt_loads)}")
 
+        pool = ThreadPool(16)  # have max 16 concurrent examples in the network
+
         for e in range(epochs):
             if e % 1000 == 0:
                 ckpt_saves = [layer.save.remote(f"{ckpt_path}/{i}/", e) for i, layer in enumerate(self.all_layers)]
@@ -53,7 +60,12 @@ class Swarm:
 
             data = self.dataloader()
 
-            error, loss = drive_example(self, data)
+            def map_fn(_):
+                return drive_example(self, data)
+
+            result = list(pool.imap_unordered(map_fn, range(32)))
+            result = np.array(result)
+            error, loss = result.mean(axis=0)
 
             opts = [layers.opt.remote() for layers in self.all_layers]
             ray.wait(opts, num_returns=len(opts))

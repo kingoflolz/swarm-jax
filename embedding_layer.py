@@ -1,7 +1,9 @@
 import functools
 import operator
 import random
+import time
 from functools import partial
+from queue import Queue
 from typing import Optional
 
 import haiku as hk
@@ -11,7 +13,7 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint, opt_state
+from swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function
 
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
@@ -93,15 +95,34 @@ class EmbeddingLayer(object):
         self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, obs)
 
+        self.init = False
+
+    def run(self):
+        def forward(obs):
+            return self.embed_fwd(obs, self.state)
+
+        def backward(y_dy, obs):
+            diff, new_grad_acc = self.embed_grad(obs, y_dy, self.state["grad_acc"], self.state["params"])
+            self.state["grad_acc"] = new_grad_acc
+            self.state["grad_count"] = self.state["grad_count"] + 1
+
+            return diff
+
+        self.fwd_q = Queue(2)
+        self.bwd_q = Queue(2)
+        self.init = True
+
+        run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
+
     def embed_forward(self, obs):
-        return self.embed_fwd(obs, self.state)
+        while not self.init:
+            time.sleep(0.1)
+        return run_function(self.fwd_q, obs)
 
     def embed_grad(self, obs, y_dy):
-        diff, new_grad_acc = self.embed_grad(obs, ray.get(y_dy[0]), self.state["grad_acc"], self.state["params"])
-        self.state["grad_acc"] = new_grad_acc
-        self.state["grad_count"] = self.state["grad_count"] + 1
-
-        return diff
+        while not self.init:
+            time.sleep(0.1)
+        return run_function(self.bwd_q, y_dy, obs)
 
     def opt(self):
         self.state = opt_state(self.state, self.optimizer)
@@ -193,22 +214,43 @@ class ProjLayer(object):
         self.debed_fwd(data, self.state)
 
         self.debed_grad = debed_grad_fn
-        _, _, _, new_acc = self.debed_grad(data, np.ones_like(data).mean(axis=-1), self.state["grad_acc"], self.state["params"])
+        _, _, _, new_acc = self.debed_grad(data, np.ones_like(data).mean(axis=-1), self.state["grad_acc"],
+                                           self.state["params"])
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
         self.state = init_fn(master_rng, data)
 
+        self.init = False
+
+    def run(self):
+        def forward(h):
+            return self.debed_fwd(h, self.state)
+
+        def backward(h, targets):
+            hidden, x_grad, loss, new_acc = self.debed_grad(h, targets, self.state["grad_acc"],
+                                                            self.state["params"])
+            self.state["grad_acc"] = new_acc
+            self.state["grad_count"] = self.state["grad_count"] + 1
+
+            return (hidden, x_grad), loss
+
+        self.fwd_q = Queue(2)
+        self.bwd_q = Queue(2)
+        self.init = True
+
+        run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
+
     def debed_forward(self, h):
-        return self.debed_fwd(ray.get(h[0]), self.state)
+        while not self.init:
+            time.sleep(0.1)
+        return run_function(self.fwd_q, h)
 
     @ray.method(num_returns=2)
     def debed_grad(self, h, targets):
-        hidden, x_grad, loss, new_acc = self.debed_grad(ray.get(h[0]), targets, self.state["grad_acc"], self.state["params"])
-        self.state["grad_acc"] = new_acc
-        self.state["grad_count"] = self.state["grad_count"] + 1
-
-        return (hidden, x_grad), loss
+        while not self.init:
+            time.sleep(0.1)
+        return run_function(self.bwd_q, h, targets)
 
     def opt(self):
         self.state = opt_state(self.state, self.optimizer)
