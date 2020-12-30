@@ -4,6 +4,7 @@ Common methods for layer actors
 import functools
 import pickle
 import re
+from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
 from queue import Queue, Empty
@@ -150,3 +151,76 @@ def run_function(q: Queue, obj_id, *aux):
         q.put((ret_q, obj_id, *aux))
 
     return ret_q.get()
+
+
+@functools.partial(jax.jit, static_argnums=2)
+def int_quantize_jit(x: jnp.ndarray, max_int: int, to_type: str):
+    min = x.min(axis=1, keepdims=True)
+    max = x.max(axis=1, keepdims=True)
+
+    offset = min
+    scale = max - min
+
+    normalized = (x - min) / scale
+    return offset, scale, (normalized * max_int).astype(to_type)
+
+
+def quantize(x: jnp.ndarray, to_type: str):
+    assert to_type in ["float16", "float32", "uint16", "uint8"]
+
+    if "int" in to_type:
+        max_int = 2 ** 8 - 1 if to_type == "uint8" else 2 ** 16 - 1
+        return to_type, int_quantize_jit(x, max_int, to_type)
+    else:
+        return to_type, x.astype(to_type)
+
+
+@functools.partial(jax.jit, static_argnums=4)
+def int_dequantize_jit(x: jnp.ndarray, scale: jnp.ndarray, offset: jnp.ndarray, max_int: int, to_type: str):
+    return x.astype(to_type) * scale.astype(to_type) / max_int + offset.astype(to_type)
+
+
+def dequantize(x, to_type: str):
+    from_type, data = x
+    assert from_type in ["float16", "float32", "uint16", "uint8"]
+
+    if "int" in from_type:
+        offset, scale, data = data
+        max_int = 2 ** 8 - 1 if from_type == "uint8" else 2 ** 16 - 1
+
+        return int_dequantize_jit(data, scale, offset, max_int, to_type)
+    else:
+        return data.astype(to_type)
+
+
+@dataclass
+class NetworkPrecision:
+    fwd_act: str
+    rev_act: str
+    grad: str
+
+
+if __name__ == "__main__":
+    import os
+
+    os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/opt/cuda-10.1"
+
+    rng = jax.random.PRNGKey(0)
+
+    r = jax.random.normal(rng, (16, 128, 512))
+
+    q = quantize(r, "uint16")
+    d = dequantize(q, "float32")
+    assert jnp.allclose(r, d, atol=1e-3, rtol=1e-3)
+
+    q = quantize(r, "uint8")
+    d = dequantize(q, "float32")
+    assert jnp.allclose(r, d, atol=1e-1, rtol=1e-1)
+
+    q = quantize(r, "float16")
+    d = dequantize(q, "float32")
+    assert jnp.allclose(r, d, atol=1e-3, rtol=1e-3)
+
+    q = quantize(r, "float32")
+    d = dequantize(q, "float32")
+    assert jnp.allclose(r, d)

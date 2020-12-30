@@ -13,7 +13,8 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function
+from swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
+    quantize, dequantize
 
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
@@ -26,10 +27,12 @@ def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
 
 @ray.remote(num_gpus=0.01, num_cpus=0.01)
 class EmbeddingLayer(object):
-    def __init__(self, obs, vocab: int, d_model: int, optimizer: optax.GradientTransformation):
+    def __init__(self, obs, vocab: int, d_model: int, optimizer: optax.GradientTransformation,
+                 precision: NetworkPrecision):
         self.vocab = vocab
         self.d_model = d_model
         self.optimizer = optimizer
+        self.precision = precision
 
         def embed_forward(x):
             embed_init = hk.initializers.TruncatedNormal(stddev=0.02)
@@ -86,11 +89,10 @@ class EmbeddingLayer(object):
         print(f'Param count = {num_params}')
 
         self.embed_fwd = embed_fwd_fn
-        e = self.embed_fwd(obs, self.state).astype("float16")
+        e = self.embed_fwd(obs, self.state)
 
         self.embed_grad = embed_grad_fn
-        _, new_acc = self.embed_grad(obs, (e.astype("float32"), e.astype("float32")), self.state["grad_acc"],
-                                     self.state["params"])
+        _, new_acc = self.embed_grad(obs, (e, e), self.state["grad_acc"], self.state["params"])
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
@@ -100,11 +102,11 @@ class EmbeddingLayer(object):
 
     def run(self):
         def forward(obs):
-            return self.embed_fwd(obs, self.state).astype("float16")
+            return quantize(self.embed_fwd(obs, self.state), self.precision.fwd_act)
 
         def backward(y_dy, obs):
             y, dy = y_dy
-            y_dy = (y.astype("float32"), dy.astype("float32"))
+            y_dy = (dequantize(y, "float32"), dequantize(dy, "float32"))
             diff, new_grad_acc = self.embed_grad(obs, y_dy, self.state["grad_acc"], self.state["params"])
             self.state["grad_acc"] = new_grad_acc
             self.state["grad_count"] = self.state["grad_count"] + 1
@@ -149,13 +151,15 @@ class EmbeddingLayer(object):
 
 @ray.remote(num_gpus=0.01, num_cpus=0.01)
 class ProjLayer(object):
-    def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation, loss_scale: float):
+    def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation, loss_scale: float,
+                 precision: NetworkPrecision):
         self.vocab = vocab
         self.d_model = d_model
         self.optimizer = optimizer
         self.loss_scale = loss_scale
+        self.precision = precision
 
-        data = data.astype("float32")
+        data = dequantize(data, "float32")
 
         def debed_forward(x):
             x = layer_norm(x)
@@ -178,7 +182,7 @@ class ProjLayer(object):
 
         master_rng = jax.random.PRNGKey(random.getrandbits(32))
 
-        @functools.partial(jax.jit, static_argnums=0)
+        @functools.partial(jax.jit)
         def init_fn(master_rng, data):
             out_rng, init_rng = jax.random.split(master_rng)
             params = self.proj_fwd_fn.init(init_rng, data)
@@ -217,29 +221,30 @@ class ProjLayer(object):
         print(f'Param count = {num_params}')
 
         self.debed_fwd = debed_fwd_fn
-        self.debed_fwd(data, self.state)
+        self.debed_fwd(jnp.zeros_like(data), self.state)
 
         self.debed_grad = debed_grad_fn
-        _, _, _, new_acc = self.debed_grad(data, np.ones_like(data).mean(axis=-1), self.state["grad_acc"],
+        _, _, _, new_acc = self.debed_grad(jnp.zeros_like(data), np.ones_like(data).mean(axis=-1),
+                                           self.state["grad_acc"],
                                            self.state["params"])
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
-        self.state = init_fn(master_rng, data)
+        self.state = init_fn(master_rng, jnp.zeros_like(data))
 
         self.init = False
 
     def run(self):
         def forward(h):
-            return self.debed_fwd(h.astype("float32"), self.state)
+            return self.debed_fwd(dequantize(h, "float32"), self.state)
 
         def backward(h, targets):
-            hidden, x_grad, loss, new_acc = self.debed_grad(h.astype("float32"), targets, self.state["grad_acc"],
+            hidden, x_grad, loss, new_acc = self.debed_grad(dequantize(h, "float32"), targets, self.state["grad_acc"],
                                                             self.state["params"])
             self.state["grad_acc"] = new_acc
             self.state["grad_count"] = self.state["grad_count"] + 1
 
-            return (hidden, x_grad), loss
+            return (quantize(hidden, self.precision.rev_act), quantize(x_grad, self.precision.grad)), loss
 
         self.fwd_q = Queue(2)
         self.bwd_q = Queue(2)
