@@ -61,7 +61,7 @@ class Swarm:
         pool = ThreadPool(16)  # have max 16 concurrent examples in the network
 
         for e in range(epochs):
-            if e % 1000 == 0:
+            if e % 5000 == 0:
                 ckpt_saves = [layer.save.remote(f"{ckpt_path}/{i}/", e) for i, layer in enumerate(self.all_layers)]
                 ray.wait(ckpt_saves, num_returns=len(ckpt_saves))
 

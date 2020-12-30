@@ -26,6 +26,6 @@ prec = NetworkPrecision(fwd_act="uint16", rev_act="uint16", grad="uint16")
 
 model = SwarmCharTransformer
 swarm = Swarm(model, optimizer, 2 ** 16, train_dataset.get_samples, prec)
-swarm.run(100000, "runs/uint16_2", "ckpt/uint16_2")
+swarm.run(100000, "runs/uint16_roundnear", "ckpt/uint16_roundnear")
 
 ray.shutdown()

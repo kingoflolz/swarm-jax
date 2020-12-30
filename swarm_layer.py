@@ -162,7 +162,7 @@ def int_quantize_jit(x: jnp.ndarray, max_int: int, to_type: str):
     scale = max - min
 
     normalized = (x - min) / scale
-    return offset, scale, (normalized * max_int).astype(to_type)
+    return offset, scale, (normalized * max_int + 0.5).astype(to_type)  # round to nearest instead of round to zero
 
 
 def quantize(x: jnp.ndarray, to_type: str):
