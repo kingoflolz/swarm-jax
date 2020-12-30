@@ -14,6 +14,8 @@ Look in `swarm_run.py` for an example of running a character transformer on enwi
 - [x] Logging
 - [x] Checkpointing
 - [x] Actually do pipelining
+- [x] fp16 with static loss scaling
+- [ ] Integer quantization for activations and gradients between layers 
 - [ ] Get rid of pipeline stalls from running optimizer
 - [ ] Data parallelism with multiple nodes per layer and gradient/weight aggregation
 - [ ] Heterogeneous nodes with potentially multiple layers per node

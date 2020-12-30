@@ -28,6 +28,8 @@ class ReversibleLayer(object):
         self.layer = layer
         self.optimizer = optimizer
 
+        data = data.astype("float32")
+
         def forward(x):
             f, g = layer_init(layer)
 
@@ -41,7 +43,7 @@ class ReversibleLayer(object):
             assert x1.shape == y1.shape
             assert x2.shape == y2.shape
 
-            return jnp.concatenate((y1, y2), axis=-1)
+            return jnp.concatenate((y1, y2), axis=-1).astype("float16").astype("float32")
 
         def reverse(y):
             f, g = layer_init(layer)
@@ -53,7 +55,7 @@ class ReversibleLayer(object):
             x2 = y2 - g(y1)
             x1 = y1 - f(x2)
 
-            return jnp.concatenate((x1, x2), axis=-1)
+            return jnp.concatenate((x1, x2), axis=-1).astype("float16").astype("float32")
 
         self.forward_fn = hk.transform(forward)
         self.reverse_fn = hk.transform(reverse)
@@ -91,7 +93,7 @@ class ReversibleLayer(object):
             weights_grad, _, x_grad = vjpfun(dy)
 
             new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
-            return (reconstr_x, x_grad), new_acc
+            return (reconstr_x, x_grad.astype("float16").astype("float32")), new_acc
 
         self.state = init_fn(master_rng, data)
         num_params = hk.data_structures.tree_size(self.state["params"])
@@ -111,13 +113,17 @@ class ReversibleLayer(object):
 
     def run(self):
         def forward(h):
-            return self.forward(h, self.state)
+            return self.forward(h.astype("float32"), self.state).astype("float16")
 
         def backward(y_dy):
+            y, dy = y_dy
+            y_dy = (y.astype("float32"), dy.astype("float32"))
             x_dx, new_acc = self.reverse(y_dy, self.state["grad_acc"], self.state["params"])
             self.state["grad_acc"] = new_acc
             self.state["grad_count"] = self.state["grad_count"] + 1
-            return x_dx
+
+            x, dx = x_dx
+            return x.astype("float16"), dx
 
         self.fwd_q = Queue(2)
         self.bwd_q = Queue(2)

@@ -38,7 +38,8 @@ def load_checkpoint(path):
     return None
 
 
-@functools.partial(jax.jit, donate_argnums=(0, 1, 2), static_argnums=3)
+# @functools.partial(jax.jit, donate_argnums=(0, 1, 2), static_argnums=3)
+@functools.partial(jax.jit, static_argnums=3)
 def opt_jit(grad_acc, opt_state, params, optimizer):
     updates, new_opt_state = optimizer.update(grad_acc, opt_state)
     new_params = optax.apply_updates(params, updates)

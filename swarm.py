@@ -15,11 +15,16 @@ class Swarm:
     def __init__(self,
                  model: SwarmModel,
                  optimizer: optax.GradientTransformation,
+                 loss_scale: float,
                  dataloader: Callable):
         self.model = model
-        self.optimizer = optimizer
+        self.optimizer = optax.chain(
+            optax.scale(1 / loss_scale),
+            optimizer
+        )
         self.dataloader = dataloader
         self.minibatches = 1
+        self.loss_scale = loss_scale
 
         assert ray.is_initialized()  # needs a valid ray cluster to start
 
@@ -30,12 +35,14 @@ class Swarm:
 
         x = self.embedding.embed_forward.remote(example["obs"])
 
-        self.proj = ProjLayer.options(max_concurrency=8).remote(x, self.model.vocab, self.model.d_model, self.optimizer)
+        self.proj = ProjLayer.options(max_concurrency=8).remote(x, self.model.vocab, self.model.d_model, self.optimizer,
+                                                                self.loss_scale)
         self.proj.run.remote()
 
         self.layers = []
         for i in range(model.rev_layers):
-            self.layers.append(ReversibleLayer.options(max_concurrency=8).remote(self.model.rev_init, i, x, optimizer))
+            self.layers.append(
+                ReversibleLayer.options(max_concurrency=8).remote(self.model.rev_init, i, x, self.optimizer))
 
         for l in self.layers:
             l.run.remote()
@@ -63,14 +70,14 @@ class Swarm:
             def map_fn(_):
                 return drive_example(self, data)
 
-            result = list(pool.imap_unordered(map_fn, range(32)))
+            result = list(pool.imap_unordered(map_fn, range(1)))  # 1 microbatches per batch
             result = np.array(result)
             error, loss = result.mean(axis=0)
 
             opts = [layers.opt.remote() for layers in self.all_layers]
             ray.wait(opts, num_returns=len(opts))
 
-            writer.add_scalar("loss", loss, e)
+            writer.add_scalar("loss", loss / self.loss_scale, e)
             writer.add_scalar("reconstruction_error", error, e)
 
 

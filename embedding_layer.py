@@ -86,10 +86,11 @@ class EmbeddingLayer(object):
         print(f'Param count = {num_params}')
 
         self.embed_fwd = embed_fwd_fn
-        e = self.embed_fwd(obs, self.state)
+        e = self.embed_fwd(obs, self.state).astype("float16")
 
         self.embed_grad = embed_grad_fn
-        _, new_acc = self.embed_grad(obs, (e, e), self.state["grad_acc"], self.state["params"])
+        _, new_acc = self.embed_grad(obs, (e.astype("float32"), e.astype("float32")), self.state["grad_acc"],
+                                     self.state["params"])
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
@@ -99,9 +100,11 @@ class EmbeddingLayer(object):
 
     def run(self):
         def forward(obs):
-            return self.embed_fwd(obs, self.state)
+            return self.embed_fwd(obs, self.state).astype("float16")
 
         def backward(y_dy, obs):
+            y, dy = y_dy
+            y_dy = (y.astype("float32"), dy.astype("float32"))
             diff, new_grad_acc = self.embed_grad(obs, y_dy, self.state["grad_acc"], self.state["params"])
             self.state["grad_acc"] = new_grad_acc
             self.state["grad_count"] = self.state["grad_count"] + 1
@@ -146,10 +149,13 @@ class EmbeddingLayer(object):
 
 @ray.remote(num_gpus=0.01, num_cpus=0.01)
 class ProjLayer(object):
-    def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation):
+    def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation, loss_scale: float):
         self.vocab = vocab
         self.d_model = d_model
         self.optimizer = optimizer
+        self.loss_scale = loss_scale
+
+        data = data.astype("float32")
 
         def debed_forward(x):
             x = layer_norm(x)
@@ -163,7 +169,7 @@ class ProjLayer(object):
             assert logits.shape == target_onehot.shape
 
             loss = -jnp.sum(target_onehot * jax.nn.log_softmax(logits), axis=-1)
-            loss = jnp.mean(loss)
+            loss = jnp.mean(loss) * self.loss_scale
 
             return loss
 
@@ -225,10 +231,10 @@ class ProjLayer(object):
 
     def run(self):
         def forward(h):
-            return self.debed_fwd(h, self.state)
+            return self.debed_fwd(h.astype("float32"), self.state)
 
         def backward(h, targets):
-            hidden, x_grad, loss, new_acc = self.debed_grad(h, targets, self.state["grad_acc"],
+            hidden, x_grad, loss, new_acc = self.debed_grad(h.astype("float32"), targets, self.state["grad_acc"],
                                                             self.state["params"])
             self.state["grad_acc"] = new_acc
             self.state["grad_count"] = self.state["grad_count"] + 1
