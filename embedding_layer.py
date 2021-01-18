@@ -78,9 +78,11 @@ class EmbeddingLayer(object):
             y_new, vjpfun = jax.vjp(self.embed_fwd_fn.apply, params, None, obs)
             weights_grad, _, _ = vjpfun(dy)
             diff = jnp.square(y - y_new).mean()
+            cos_err = jnp.abs(1.0 - jnp.dot(y_new.flatten(), y.flatten()) / (
+                        jnp.linalg.norm(y.flatten()) * jnp.linalg.norm(y_new.flatten())))
 
             new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
-            return diff, new_acc
+            return diff, cos_err, new_acc
 
         # we call all the functions here to trigger jit at init
         self.state = init_fn(master_rng, obs)
@@ -92,7 +94,7 @@ class EmbeddingLayer(object):
         e = self.embed_fwd(obs, self.state)
 
         self.embed_grad = embed_grad_fn
-        _, new_acc = self.embed_grad(obs, (e, e), self.state["grad_acc"], self.state["params"])
+        _, _, new_acc = self.embed_grad(obs, (e, e), self.state["grad_acc"], self.state["params"])
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
@@ -107,11 +109,11 @@ class EmbeddingLayer(object):
         def backward(y_dy, obs):
             y, dy = y_dy
             y_dy = (dequantize(y, "float32"), dequantize(dy, "float32"))
-            diff, new_grad_acc = self.embed_grad(obs, y_dy, self.state["grad_acc"], self.state["params"])
+            diff, cos_err, new_grad_acc = self.embed_grad(obs, y_dy, self.state["grad_acc"], self.state["params"])
             self.state["grad_acc"] = new_grad_acc
             self.state["grad_count"] = self.state["grad_count"] + 1
 
-            return diff
+            return diff, cos_err
 
         self.fwd_q = Queue(2)
         self.bwd_q = Queue(2)

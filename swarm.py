@@ -74,13 +74,14 @@ class Swarm:
 
             result = list(pool.imap_unordered(map_fn, range(1)))  # 1 microbatches per batch
             result = np.array(result)
-            error, loss = result.mean(axis=0)
+            error, cos_err, loss = result.mean(axis=0)
 
             opts = [layers.opt.remote() for layers in self.all_layers]
             ray.wait(opts, num_returns=len(opts))
 
             writer.add_scalar("loss", loss / self.loss_scale, e)
             writer.add_scalar("reconstruction_error", error, e)
+            writer.add_scalar("reconstruction_cos_error", cos_err, e)
 
 
 # take a training example and shoves it through forward and backward of all layers
@@ -103,4 +104,4 @@ def drive_example(swarm: Swarm, data):
     error = swarm.embedding.embed_grad.remote(data["obs"], (y_dy,))
     ray.wait([error])
 
-    return ray.get(error), ray.get(loss)
+    return *ray.get(error), ray.get(loss)

@@ -97,29 +97,32 @@ class SwarmModel:
         self.rev_layers = rev_layers
 
 
+n_layer = 30
+
+
 def char_layer_init(i):
     if i % 2:
         f = MultiHeadAttentionFixed(
             num_heads=4,
             key_size=64,
-            w_init_scale=2. / 12,
+            w_init_scale=2. / n_layer,
             name=f'l{i}_f_attn',
         )
         g = MultiHeadAttentionFixed(
             num_heads=4,
             key_size=64,
-            w_init_scale=2. / 12,
+            w_init_scale=2. / n_layer,
             name=f'l{i}_g_attn',
         )
     else:
         f = DenseBlock(
-            init_scale=2. / 12,
+            init_scale=2. / n_layer,
             name=f'l{i}_f_dense',
             widening_factor=4
         )
 
         g = DenseBlock(
-            init_scale=2. / 12,
+            init_scale=2. / n_layer,
             name=f'l{i}_g_dense',
             widening_factor=4
         )
@@ -130,5 +133,5 @@ SwarmCharTransformer = SwarmModel(
     vocab=256,
     d_model=512,
     rev_init=char_layer_init,
-    rev_layers=12
+    rev_layers=n_layer
 )
