@@ -1,6 +1,6 @@
 import os
 
-from swarm_layer import NetworkPrecision
+from swarm_jax.swarm_layer import NetworkPrecision
 
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/opt/cuda-10.1"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -8,8 +8,8 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 os.environ["JAX_DEBUG_NANS"] = "True"
 
 from loader import TextLoader
-from model import SwarmCharTransformer
-from swarm import Swarm
+from swarm_jax.model import SwarmCharTransformer
+from swarm_jax.swarm import Swarm
 
 import ray
 import optax
@@ -26,6 +26,6 @@ prec = NetworkPrecision(fwd_act="uint16", rev_act="uint16", grad="uint16")
 
 model = SwarmCharTransformer
 swarm = Swarm(model, optimizer, 2 ** 16, train_dataset.get_samples, prec)
-swarm.run(100000, "runs/uint16_roundnear", "ckpt/uint16_roundnear")
+swarm.run(100000, "runs/512_30L", "ckpt/512_30L")
 
 ray.shutdown()

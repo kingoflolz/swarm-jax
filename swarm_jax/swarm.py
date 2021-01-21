@@ -6,10 +6,10 @@ import optax
 import ray
 from tensorboardX import SummaryWriter
 
-from embedding_layer import EmbeddingLayer, ProjLayer
-from model import SwarmModel
-from reversible_layer import ReversibleLayer
-from swarm_layer import NetworkPrecision
+from .embedding_layer import EmbeddingLayer, ProjLayer
+from .model import SwarmModel
+from .reversible_layer import ReversibleLayer
+from .swarm_layer import NetworkPrecision
 
 
 class Swarm:
@@ -82,6 +82,7 @@ class Swarm:
             writer.add_scalar("loss", loss / self.loss_scale, e)
             writer.add_scalar("reconstruction_error", error, e)
             writer.add_scalar("reconstruction_cos_error", cos_err, e)
+            print(e, loss / self.loss_scale)
 
 
 # take a training example and shoves it through forward and backward of all layers
@@ -104,4 +105,6 @@ def drive_example(swarm: Swarm, data):
     error = swarm.embedding.embed_grad.remote(data["obs"], (y_dy,))
     ray.wait([error])
 
-    return *ray.get(error), ray.get(loss)
+    ret = ray.get(error) + (ray.get(loss),)
+
+    return ret

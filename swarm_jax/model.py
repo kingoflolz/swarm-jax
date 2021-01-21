@@ -97,8 +97,7 @@ class SwarmModel:
         self.rev_layers = rev_layers
 
 
-n_layer = 30
-
+n_layer = 2
 
 def char_layer_init(i):
     if i % 2:

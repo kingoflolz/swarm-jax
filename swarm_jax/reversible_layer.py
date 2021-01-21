@@ -13,11 +13,11 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
+from .swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
     quantize, dequantize
 
 
-@ray.remote(num_gpus=0.01, num_cpus=0.01)
+@ray.remote(resources={"tpu": 1})
 class ReversibleLayer(object):
     def __init__(
             self,

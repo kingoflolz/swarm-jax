@@ -13,7 +13,7 @@ import numpy as np
 import optax
 import ray
 
-from swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
+from .swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
     quantize, dequantize
 
 
@@ -25,7 +25,7 @@ def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
                         name=name)(x)
 
 
-@ray.remote(num_gpus=0.01, num_cpus=0.01)
+@ray.remote(resources={"tpu": 1})
 class EmbeddingLayer(object):
     def __init__(self, obs, vocab: int, d_model: int, optimizer: optax.GradientTransformation,
                  precision: NetworkPrecision):
@@ -33,6 +33,8 @@ class EmbeddingLayer(object):
         self.d_model = d_model
         self.optimizer = optimizer
         self.precision = precision
+
+        print("start init")
 
         def embed_forward(x):
             embed_init = hk.initializers.TruncatedNormal(stddev=0.02)
@@ -45,10 +47,13 @@ class EmbeddingLayer(object):
             return o
 
         self.embed_fwd_fn = hk.transform(embed_forward)
+        print("forward transformed")
 
         master_rng = jax.random.PRNGKey(random.getrandbits(32))
 
-        @functools.partial(jax.jit, static_argnums=0)
+        print("rng done")
+
+        @functools.partial(jax.jit)
         def init_fn(master_rng, data):
             out_rng, init_rng = jax.random.split(master_rng)
             params = self.embed_fwd_fn.init(init_rng, data)
@@ -79,13 +84,15 @@ class EmbeddingLayer(object):
             weights_grad, _, _ = vjpfun(dy)
             diff = jnp.square(y - y_new).mean()
             cos_err = jnp.abs(1.0 - jnp.dot(y_new.flatten(), y.flatten()) / (
-                        jnp.linalg.norm(y.flatten()) * jnp.linalg.norm(y_new.flatten())))
+                    jnp.linalg.norm(y.flatten()) * jnp.linalg.norm(y_new.flatten())))
 
             new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
             return diff, cos_err, new_acc
 
         # we call all the functions here to trigger jit at init
         self.state = init_fn(master_rng, obs)
+
+        print("state init")
 
         num_params = hk.data_structures.tree_size(self.state["params"])
         print(f'Param count = {num_params}')
@@ -151,7 +158,7 @@ class EmbeddingLayer(object):
             return True
 
 
-@ray.remote(num_gpus=0.01, num_cpus=0.01)
+@ray.remote(resources={"tpu": 1})
 class ProjLayer(object):
     def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation, loss_scale: float,
                  precision: NetworkPrecision):
