@@ -4,7 +4,6 @@ import random
 import time
 from functools import partial
 from queue import Queue
-from typing import Optional
 
 import haiku as hk
 import jax
@@ -12,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import ray
+from typing import Optional
 
 from .swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
     quantize, dequantize
@@ -35,6 +35,8 @@ class EmbeddingLayer(object):
         self.precision = precision
 
         print("start init")
+        jax.local_device_count()
+        print("done jax init")
 
         def embed_forward(x):
             embed_init = hk.initializers.TruncatedNormal(stddev=0.02)
@@ -47,11 +49,7 @@ class EmbeddingLayer(object):
             return o
 
         self.embed_fwd_fn = hk.transform(embed_forward)
-        print("forward transformed")
-
         master_rng = jax.random.PRNGKey(random.getrandbits(32))
-
-        print("rng done")
 
         @functools.partial(jax.jit)
         def init_fn(master_rng, data):
@@ -128,10 +126,11 @@ class EmbeddingLayer(object):
 
         run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
 
+    @ray.method(num_returns=2)
     def embed_forward(self, obs):
         while not self.init:
             time.sleep(0.1)
-        return run_function(self.fwd_q, obs)
+        return run_function(self.fwd_q, obs), None
 
     def embed_grad(self, obs, y_dy):
         while not self.init:
@@ -261,10 +260,11 @@ class ProjLayer(object):
 
         run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
 
+    @ray.method(num_returns=2)
     def debed_forward(self, h):
         while not self.init:
             time.sleep(0.1)
-        return run_function(self.fwd_q, h)
+        return run_function(self.fwd_q, h), 0
 
     @ray.method(num_returns=2)
     def debed_grad(self, h, targets):

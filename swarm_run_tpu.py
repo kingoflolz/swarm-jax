@@ -2,7 +2,7 @@ import optax
 import ray
 
 from loader import TextLoader
-from ray_tpu import start_ray, get_connection, delete_tpu
+from ray_tpu import start_ray, get_connection, delete_tpu, create_tpu, wait_til
 from swarm_jax.model import SwarmCharTransformer
 from swarm_jax.swarm import Swarm
 from swarm_jax.swarm_layer import NetworkPrecision
@@ -18,19 +18,24 @@ address = head_info['redis_address']
 delete_tpu("swarm-jax-test", "europe-west4-a")
 
 conns = []
-# for i in range(4):
-#     create_tpu(f"swarm-jax-test-{i}", "europe-west4-a", "v3-8", False)
-#
-# for i in range(4):
-#     assert wait_til(f"swarm-jax-test-{i}", "europe-west4-a", {'state': 'READY', 'health': 'HEALTHY'})
+for i in range(8):
+    create_tpu(f"swarm-jax-test-{i}", "europe-west4-a", "v3-8", False)
 
-for i in range(4):
+for i in range(8):
+    assert wait_til(f"swarm-jax-test-{i}", "europe-west4-a", {'state': 'READY', 'health': 'HEALTHY'})
+
+for i in range(8):
     conns += get_connection(f"swarm-jax-test-{i}", "europe-west4-a")
+
+# for i in range(8):
+#     delete_tpu(f"swarm-jax-test-{i}", "europe-west4-a")
+
+# exit()
 
 for c in conns:
     start_ray(c, address)
 
-train_dataset = TextLoader("data/enwik9", batchsize=16, sample_size=128, length=90000000)
+train_dataset = TextLoader("data/enwik9", batchsize=128, sample_size=256, length=90000000)
 
 optimizer = optax.chain(
     optax.clip_by_global_norm(0.25),

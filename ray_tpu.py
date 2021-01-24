@@ -1,9 +1,9 @@
 import functools
-import glob
 import os
 import subprocess
 import time
 
+import glob
 import requests
 from fabric import Connection
 
@@ -136,7 +136,7 @@ def start_ray(conn, address):
     print(conn.sudo('chmod +x /tmp/ray-tpu.sh'))
     print(conn.sudo('/tmp/ray-tpu.sh'))
     try:
-        print(conn.run('ray stop'))
+        print(conn.run('ray stop -f'))
     except:
         pass
     print(conn.run(f"ray start --address={address} --load-code-from-local --resources='" + '{"tpu": 1}\''))

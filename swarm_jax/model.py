@@ -1,9 +1,8 @@
-from typing import Optional, Callable
-
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
+from typing import Optional, Callable
 
 
 class MultiHeadAttentionFixed(hk.Module):
@@ -97,7 +96,7 @@ class SwarmModel:
         self.rev_layers = rev_layers
 
 
-n_layer = 2
+n_layer = 6
 
 def char_layer_init(i):
     if i % 2:

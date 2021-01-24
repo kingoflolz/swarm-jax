@@ -1,10 +1,10 @@
 from multiprocessing.pool import ThreadPool
-from typing import Callable
 
 import numpy as np
 import optax
 import ray
 from tensorboardX import SummaryWriter
+from typing import Callable
 
 from .embedding_layer import EmbeddingLayer, ProjLayer
 from .model import SwarmModel
@@ -35,7 +35,7 @@ class Swarm:
                                                                           self.model.d_model, self.optimizer, precision)
         self.embedding.run.remote()
 
-        x = self.embedding.embed_forward.remote(example["obs"])
+        x, _ = self.embedding.embed_forward.remote(example["obs"])
 
         self.proj = ProjLayer.options(max_concurrency=8).remote(x, self.model.vocab, self.model.d_model, self.optimizer,
                                                                 self.loss_scale, precision)
@@ -72,7 +72,7 @@ class Swarm:
             def map_fn(_):
                 return drive_example(self, data)
 
-            result = list(pool.imap_unordered(map_fn, range(1)))  # 1 microbatches per batch
+            result = list(pool.imap_unordered(map_fn, range(32)))  # 32 microbatches per batch
             result = np.array(result)
             error, cos_err, loss = result.mean(axis=0)
 
@@ -87,20 +87,20 @@ class Swarm:
 
 # take a training example and shoves it through forward and backward of all layers
 def drive_example(swarm: Swarm, data):
-    x = swarm.embedding.embed_forward.remote(data["obs"])
-    ray.wait([x])
+    x, x_wait = swarm.embedding.embed_forward.remote(data["obs"])
+    ray.wait([x_wait])
 
     # wrap all big ray objects in unit tuples to stop implicit .get
     for l in swarm.layers:
-        x = l.forward.remote((x,))
-        ray.wait([x])
+        x, x_wait = l.forward.remote((x,))
+        ray.wait([x_wait])
 
     y_dy, loss = swarm.proj.debed_grad.remote((x,), data["target"])
-    ray.wait([y_dy])
+    ray.wait([loss])
 
     for l in reversed(swarm.layers):
-        y_dy = l.backward.remote((y_dy,))
-        ray.wait([y_dy])
+        y_dy, y_dy_wait = l.backward.remote((y_dy,))
+        ray.wait([y_dy_wait])
 
     error = swarm.embedding.embed_grad.remote(data["obs"], (y_dy,))
     ray.wait([error])

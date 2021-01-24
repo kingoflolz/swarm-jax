@@ -4,7 +4,6 @@ import random
 import time
 from functools import partial
 from queue import Queue
-from typing import Callable
 
 import haiku as hk
 import jax
@@ -12,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import ray
+from typing import Callable
 
 from .swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
     quantize, dequantize
@@ -135,15 +135,17 @@ class ReversibleLayer(object):
 
         run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
 
+    @ray.method(num_returns=2)
     def forward(self, h):
         while not self.init:
             time.sleep(0.1)
-        return run_function(self.fwd_q, h)
+        return run_function(self.fwd_q, h), None
 
+    @ray.method(num_returns=2)
     def backward(self, y_dy):
         while not self.init:
             time.sleep(0.1)
-        return run_function(self.bwd_q, y_dy)
+        return run_function(self.bwd_q, y_dy), None
 
     def opt(self):
         self.state = opt_state(self.state, self.optimizer)
