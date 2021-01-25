@@ -2,19 +2,17 @@ import functools
 import operator
 import random
 import time
-from functools import partial
 from queue import Queue
 
 import haiku as hk
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 import ray
 from typing import Callable
 
 from .swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
-    quantize, dequantize
+    quantize, dequantize, init_fn
 
 
 @ray.remote(resources={"tpu": 1})
@@ -65,29 +63,12 @@ class ReversibleLayer(object):
 
         master_rng = jax.random.PRNGKey(random.getrandbits(32))
 
-        @functools.partial(jax.jit)
-        def init_fn(master_rng, data):
-            out_rng, init_rng = jax.random.split(master_rng)
-            params = self.forward_fn.init(init_rng, data)
-
-            # place optimizer state on CPU
-            opt_state = jax.tree_map(partial(jax.device_put, device=jax.devices("cpu")), optimizer.init(params))
-
-            return dict(
-                step=np.array(0),
-                rng=out_rng,
-                opt_state=opt_state,
-                grad_acc=jax.tree_map(jnp.zeros_like, params),
-                grad_count=np.array(1),
-                params=params)
-
-        @functools.partial(jax.jit, donate_argnums=0)
-        def forward_fn(x, state):
-            params = state['params']
+        @functools.partial(jax.pmap, donate_argnums=0)
+        def forward_fn(x, params):
             out = self.forward_fn.apply(params, None, x)
             return out
 
-        @functools.partial(jax.jit, donate_argnums=(0, 1))
+        @functools.partial(jax.pmap, donate_argnums=(0, 1))
         def reverse_fn(y_dy, acc, params):
             y, dy = y_dy
             reconstr_x = self.reverse_fn.apply(params, None, y)
@@ -98,12 +79,12 @@ class ReversibleLayer(object):
             new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
             return (reconstr_x, x_grad), new_acc
 
-        self.state = init_fn(master_rng, jnp.zeros_like(data))
+        self.state = init_fn(master_rng, jnp.zeros_like(data), self.forward_fn.init, optimizer)
         num_params = hk.data_structures.tree_size(self.state["params"])
         print(f'Param count = {num_params}')
 
         self.forward = forward_fn
-        self.forward(jnp.zeros_like(data), self.state)
+        self.forward(jnp.zeros_like(data), self.state["params"])
 
         self.reverse = reverse_fn
         _, new_acc = self.reverse((jnp.zeros_like(data), jnp.zeros_like(data)), self.state["grad_acc"],
@@ -111,20 +92,22 @@ class ReversibleLayer(object):
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
-        self.state = init_fn(master_rng, jnp.zeros_like(data))
+        self.state = init_fn(master_rng, jnp.zeros_like(data), self.forward_fn.init, optimizer)
 
         self.init = False
 
     def run(self):
-        def forward(h):
-            return quantize(self.forward(dequantize(h, "float32"), self.state), self.precision.fwd_act)
+        def forward(h, state):
+            return quantize(self.forward(dequantize(h, "float32"), state["params"]), self.precision.fwd_act)
 
-        def backward(y_dy):
+        def backward(y_dy, state):
             y, dy = y_dy
             y_dy = (dequantize(y, "float32"), dequantize(dy, "float32"))
-            x_dx, new_acc = self.reverse(y_dy, self.state["grad_acc"], self.state["params"])
-            self.state["grad_acc"] = new_acc
-            self.state["grad_count"] = self.state["grad_count"] + 1
+            x_dx, new_acc = self.reverse(y_dy, state["grad_acc"], state["params"])
+            state["grad_acc"] = new_acc
+            state["grad_count"] = state["grad_count"] + 1
+
+            self.state = state
 
             x, dx = x_dx
             return quantize(x, self.precision.rev_act), quantize(dx, self.precision.grad)
@@ -133,7 +116,7 @@ class ReversibleLayer(object):
         self.bwd_q = Queue(2)
         self.init = True
 
-        run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
+        run_threads(self.state, self.fwd_q, self.bwd_q, 2, forward, backward)
 
     @ray.method(num_returns=2)
     def forward(self, h):

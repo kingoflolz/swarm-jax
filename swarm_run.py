@@ -1,11 +1,11 @@
 import os
 
-from swarm_jax.swarm_layer import NetworkPrecision
-
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/opt/cuda-10.1"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 os.environ["JAX_DEBUG_NANS"] = "True"
+
+from swarm_jax.swarm_layer import NetworkPrecision
 
 from loader import TextLoader
 from swarm_jax.model import SwarmCharTransformer
@@ -14,9 +14,9 @@ from swarm_jax.swarm import Swarm
 import ray
 import optax
 
-ray.init()
+ray.init(resources={"tpu": 999})  # pretend we have infinite tpus lol
 
-train_dataset = TextLoader("data/enwik8", batchsize=16, sample_size=128, length=90000000)
+train_dataset = TextLoader("data/enwik8", batchsize=(1, 16), sample_size=128, length=90000000)
 
 optimizer = optax.chain(
     optax.clip_by_global_norm(0.25),

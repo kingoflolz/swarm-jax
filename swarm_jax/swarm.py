@@ -74,7 +74,7 @@ class Swarm:
 
             result = list(pool.imap_unordered(map_fn, range(32)))  # 32 microbatches per batch
             result = np.array(result)
-            error, cos_err, loss = result.mean(axis=0)
+            error, cos_err, loss = result.mean(axis=(0, 2))
 
             opts = [layers.opt.remote() for layers in self.all_layers]
             ray.wait(opts, num_returns=len(opts))

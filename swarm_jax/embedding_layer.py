@@ -2,7 +2,6 @@ import functools
 import operator
 import random
 import time
-from functools import partial
 from queue import Queue
 
 import haiku as hk
@@ -14,7 +13,7 @@ import ray
 from typing import Optional
 
 from .swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_threads, run_function, NetworkPrecision, \
-    quantize, dequantize
+    quantize, dequantize, init_fn
 
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
@@ -35,7 +34,7 @@ class EmbeddingLayer(object):
         self.precision = precision
 
         print("start init")
-        jax.local_device_count()
+        self.devices = jax.local_device_count()
         print("done jax init")
 
         def embed_forward(x):
@@ -51,30 +50,13 @@ class EmbeddingLayer(object):
         self.embed_fwd_fn = hk.transform(embed_forward)
         master_rng = jax.random.PRNGKey(random.getrandbits(32))
 
-        @functools.partial(jax.jit)
-        def init_fn(master_rng, data):
-            out_rng, init_rng = jax.random.split(master_rng)
-            params = self.embed_fwd_fn.init(init_rng, data)
-
-            # place optimizer state on CPU
-            opt_state = jax.tree_map(partial(jax.device_put, device=jax.devices("cpu")), optimizer.init(params))
-
-            return dict(
-                step=np.array(0),
-                rng=out_rng,
-                opt_state=opt_state,
-                grad_acc=jax.tree_map(jnp.zeros_like, params),
-                grad_count=np.array(0),
-                params=params)
-
-        @functools.partial(jax.jit)
-        def embed_fwd_fn(obs, state):
-            params = state['params']
+        @functools.partial(jax.pmap)
+        def embed_fwd_fn(obs, params):
             out = self.embed_fwd_fn.apply(params, None, obs)
 
             return out
 
-        @functools.partial(jax.jit, donate_argnums=(1, 2))
+        @functools.partial(jax.pmap, donate_argnums=(1, 2))
         def embed_grad_fn(obs, y_dy, acc, params):
             y, dy = y_dy
 
@@ -88,35 +70,35 @@ class EmbeddingLayer(object):
             return diff, cos_err, new_acc
 
         # we call all the functions here to trigger jit at init
-        self.state = init_fn(master_rng, obs)
-
-        print("state init")
+        self.state = init_fn(master_rng, obs, self.embed_fwd_fn.init, optimizer)
 
         num_params = hk.data_structures.tree_size(self.state["params"])
         print(f'Param count = {num_params}')
 
         self.embed_fwd = embed_fwd_fn
-        e = self.embed_fwd(obs, self.state)
+        e = self.embed_fwd(obs, self.state["params"])
 
         self.embed_grad = embed_grad_fn
         _, _, new_acc = self.embed_grad(obs, (e, e), self.state["grad_acc"], self.state["params"])
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
-        self.state = init_fn(master_rng, obs)
+        self.state = init_fn(master_rng, obs, self.embed_fwd_fn.init, optimizer)
 
         self.init = False
 
     def run(self):
-        def forward(obs):
-            return quantize(self.embed_fwd(obs, self.state), self.precision.fwd_act)
+        def forward(obs, state):
+            return quantize(self.embed_fwd(obs, state["params"]), self.precision.fwd_act)
 
-        def backward(y_dy, obs):
+        def backward(y_dy, obs, state):
             y, dy = y_dy
             y_dy = (dequantize(y, "float32"), dequantize(dy, "float32"))
-            diff, cos_err, new_grad_acc = self.embed_grad(obs, y_dy, self.state["grad_acc"], self.state["params"])
-            self.state["grad_acc"] = new_grad_acc
-            self.state["grad_count"] = self.state["grad_count"] + 1
+            diff, cos_err, new_grad_acc = self.embed_grad(obs, y_dy, state["grad_acc"], state["params"])
+            state["grad_acc"] = new_grad_acc
+            state["grad_count"] = state["grad_count"] + 1
+
+            self.state = state
 
             return diff, cos_err
 
@@ -124,7 +106,7 @@ class EmbeddingLayer(object):
         self.bwd_q = Queue(2)
         self.init = True
 
-        run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
+        run_threads(self.state, self.fwd_q, self.bwd_q, 2, forward, backward)
 
     @ray.method(num_returns=2)
     def embed_forward(self, obs):
@@ -190,32 +172,14 @@ class ProjLayer(object):
 
         master_rng = jax.random.PRNGKey(random.getrandbits(32))
 
-        @functools.partial(jax.jit)
-        def init_fn(master_rng, data):
-            out_rng, init_rng = jax.random.split(master_rng)
-            params = self.proj_fwd_fn.init(init_rng, data)
-
-            # place optimizer state on CPU
-            opt_state = jax.tree_map(partial(jax.device_put, device=jax.devices("cpu")), optimizer.init(params))
-
-            return dict(
-                step=np.array(0),
-                rng=out_rng,
-                opt_state=opt_state,
-                grad_acc=jax.tree_map(jnp.zeros_like, params),
-                grad_count=np.array(0),
-                params=params)
-
-        @functools.partial(jax.jit)
-        def debed_fwd_fn(target, state):
-            params = state['params']
+        @functools.partial(jax.pmap)
+        def debed_fwd_fn(target, params):
             out = self.proj_fwd_fn.apply(params, None, target)
 
             return out
 
-        @functools.partial(jax.jit, donate_argnums=(0, 2))
+        @functools.partial(jax.pmap, donate_argnums=(0, 2))
         def debed_grad_fn(hidden, target, acc, params):
-
             loss, vjpfun = jax.vjp(self.proj_loss_fn.apply, params, None, hidden, target)
             weights_grad, _, x_grad, _ = vjpfun(np.ones((), dtype=hidden.dtype))
 
@@ -223,13 +187,13 @@ class ProjLayer(object):
             return hidden, x_grad, loss, new_acc
 
         # we call all the functions here to trigger jit at init
-        self.state = init_fn(master_rng, data)
+        self.state = init_fn(master_rng, data, self.proj_fwd_fn.init, optimizer)
 
         num_params = hk.data_structures.tree_size(self.state["params"])
         print(f'Param count = {num_params}')
 
         self.debed_fwd = debed_fwd_fn
-        self.debed_fwd(jnp.zeros_like(data), self.state)
+        self.debed_fwd(jnp.zeros_like(data), self.state["params"])
 
         self.debed_grad = debed_grad_fn
         _, _, _, new_acc = self.debed_grad(jnp.zeros_like(data), np.ones_like(data).mean(axis=-1),
@@ -238,19 +202,21 @@ class ProjLayer(object):
         self.state["grad_acc"] = new_acc
 
         self.state = opt_state(self.state, self.optimizer)
-        self.state = init_fn(master_rng, jnp.zeros_like(data))
+        self.state = init_fn(master_rng, jnp.zeros_like(data), self.proj_fwd_fn.init, optimizer)
 
         self.init = False
 
     def run(self):
-        def forward(h):
-            return self.debed_fwd(dequantize(h, "float32"), self.state)
+        def forward(h, state):
+            return self.debed_fwd(dequantize(h, "float32"), state["params"])
 
-        def backward(h, targets):
-            hidden, x_grad, loss, new_acc = self.debed_grad(dequantize(h, "float32"), targets, self.state["grad_acc"],
-                                                            self.state["params"])
-            self.state["grad_acc"] = new_acc
-            self.state["grad_count"] = self.state["grad_count"] + 1
+        def backward(h, targets, state):
+            hidden, x_grad, loss, new_acc = self.debed_grad(dequantize(h, "float32"), targets, state["grad_acc"],
+                                                            state["params"])
+            state["grad_acc"] = new_acc
+            state["grad_count"] = state["grad_count"] + 1
+
+            self.state = state
 
             return (quantize(hidden, self.precision.rev_act), quantize(x_grad, self.precision.grad)), loss
 
@@ -258,7 +224,7 @@ class ProjLayer(object):
         self.bwd_q = Queue(2)
         self.init = True
 
-        run_threads(self.fwd_q, self.bwd_q, 2, forward, backward)
+        run_threads(self.state, self.fwd_q, self.bwd_q, 2, forward, backward)
 
     @ray.method(num_returns=2)
     def debed_forward(self, h):

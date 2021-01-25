@@ -1,24 +1,24 @@
 """
 Common methods for layer actors
 """
-import functools
 import pickle
 import re
-from dataclasses import dataclass
-from glob import glob
+from functools import partial
 from pathlib import Path
 from queue import Queue, Empty
 from threading import Thread
-from typing import Callable
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-# TODO: more intellegent checkpoint saving with deleting old checkpoints etc
 import ray
+from dataclasses import dataclass
+from glob import glob
+from typing import Callable
 
 
+# TODO: more intellegent checkpoint saving with deleting old checkpoints etc
 def save_checkpoint(state, path, epoch):
     Path(path).mkdir(parents=True, exist_ok=True)
 
@@ -39,11 +39,19 @@ def load_checkpoint(path):
     return None
 
 
-# @functools.partial(jax.jit, donate_argnums=(0, 1, 2), static_argnums=3)
-@functools.partial(jax.jit, static_argnums=3)
+# @partial(jax.jit, donate_argnums=(0, 1, 2), static_argnums=3)
+@partial(jax.jit, static_argnums=3)
 def opt_jit(grad_acc, opt_state, params, optimizer):
-    updates, new_opt_state = optimizer.update(grad_acc, opt_state)
-    new_params = optax.apply_updates(params, updates)
+    total_grad = jax.tree_map(lambda x: jnp.mean(x, axis=0), grad_acc)
+
+    cpu_device = jax.devices("cpu")[0]
+
+    total_grad = jax.device_put(total_grad, device=cpu_device)
+    cpu_params = jax.device_put(jax.tree_map(lambda x: x[0], params), device=cpu_device)
+
+    updates, new_opt_state = optimizer.update(total_grad, opt_state)
+
+    new_params = optax.apply_updates(cpu_params, updates)
 
     new_grad_acc = jax.tree_map(jnp.zeros_like, grad_acc)
     return new_grad_acc, new_opt_state, new_params
@@ -51,15 +59,38 @@ def opt_jit(grad_acc, opt_state, params, optimizer):
 
 def opt_state(state, optimizer):
     new_grad_acc, new_opt_state, new_params = opt_jit(state["grad_acc"],
-                                                  state["opt_state"],
-                                                  state["params"],
-                                                  optimizer)
+                                                      state["opt_state"],
+                                                      state["params"],
+                                                      optimizer)
 
     state["grad_acc"] = new_grad_acc
     state["opt_state"] = new_opt_state
-    state["params"] = new_params
+    state["params"] = jax.device_put_replicated(new_params, jax.local_devices())
     state["grad_count"] = np.array(0)
     return state
+
+
+# @partial(jax.jit)
+def init_fn(master_rng, data, init_fn, optimizer):
+    out_rng, init_rng = jax.random.split(master_rng)
+
+    # copy the same initial params to each accelerator
+    init_rng = jnp.broadcast_to(init_rng, (jax.local_device_count(),) + init_rng.shape)
+    params = jax.pmap(init_fn)(init_rng, data)
+
+    cpu_device = jax.devices("cpu")[0]
+
+    # place optimizer state on CPU
+    cpu_params = jax.tree_map(lambda x: jax.device_put(x[0], device=cpu_device), params)
+    opt_state = optimizer.init(cpu_params)
+
+    return dict(
+        step=np.array(0),
+        rng=out_rng,
+        opt_state=opt_state,
+        grad_acc=jax.tree_map(jnp.zeros_like, params),
+        grad_count=np.array(0),
+        params=params)
 
 
 # Thread to overlap remote transfers with computation (with bounded memory usage)
@@ -115,13 +146,13 @@ class RunThread(Thread):
 
 
 # create a get thread for both fwd and bwd as well as a run thread (blocks forever)
-def run_threads(fwd_in_q: Queue, bwd_in_q: Queue, queue_size: int, fwd_fn: Callable, bwd_fn: Callable):
+def run_threads(state, fwd_in_q: Queue, bwd_in_q: Queue, queue_size: int, fwd_fn: Callable, bwd_fn: Callable):
     fwd_out_q = Queue(queue_size)
     bwd_out_q = Queue(queue_size)
 
     fwd_get = GetThread(fwd_in_q, fwd_out_q)
     bwd_get = GetThread(bwd_in_q, bwd_out_q)
-    run = RunThread(fwd_out_q, bwd_out_q, fwd_fn, bwd_fn)
+    run = RunThread(fwd_out_q, bwd_out_q, partial(fwd_fn, state=state), partial(bwd_fn, state=state))
 
     fwd_get.start()
     bwd_get.start()
@@ -153,7 +184,7 @@ def run_function(q: Queue, obj_id, *aux):
     return ret_q.get()
 
 
-@functools.partial(jax.jit, static_argnums=2)
+@partial(jax.jit, static_argnums=2)
 def int_quantize_jit(x: jnp.ndarray, max_int: int, to_type: str):
     min = x.min(axis=1, keepdims=True)
     max = x.max(axis=1, keepdims=True)
@@ -175,7 +206,7 @@ def quantize(x: jnp.ndarray, to_type: str):
         return to_type, x.astype(to_type)
 
 
-@functools.partial(jax.jit, static_argnums=4)
+@partial(jax.jit, static_argnums=4)
 def int_dequantize_jit(x: jnp.ndarray, scale: jnp.ndarray, offset: jnp.ndarray, max_int: int, to_type: str):
     return x.astype(to_type) * scale.astype(to_type) / max_int + offset.astype(to_type)
 

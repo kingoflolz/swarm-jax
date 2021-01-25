@@ -101,16 +101,15 @@ n_layer = 6
 def char_layer_init(i):
     if i % 2:
         f = MultiHeadAttentionFixed(
-            num_heads=4,
-            key_size=64,
+            num_heads=8,
+            key_size=128,
             w_init_scale=2. / n_layer,
             name=f'l{i}_f_attn',
         )
-        g = MultiHeadAttentionFixed(
-            num_heads=4,
-            key_size=64,
-            w_init_scale=2. / n_layer,
-            name=f'l{i}_g_attn',
+        g = DenseBlock(
+            init_scale=2. / n_layer,
+            name=f'l{i}_g_dense',
+            widening_factor=4
         )
     else:
         f = DenseBlock(
@@ -118,11 +117,11 @@ def char_layer_init(i):
             name=f'l{i}_f_dense',
             widening_factor=4
         )
-
-        g = DenseBlock(
-            init_scale=2. / n_layer,
-            name=f'l{i}_g_dense',
-            widening_factor=4
+        g = MultiHeadAttentionFixed(
+            num_heads=8,
+            key_size=128,
+            w_init_scale=2. / n_layer,
+            name=f'l{i}_g_attn',
         )
     return f, g
 
@@ -130,6 +129,13 @@ def char_layer_init(i):
 SwarmCharTransformer = SwarmModel(
     vocab=256,
     d_model=512,
+    rev_init=char_layer_init,
+    rev_layers=n_layer
+)
+
+SwarmCharTransformerBig = SwarmModel(
+    vocab=256,
+    d_model=2048,
     rev_init=char_layer_init,
     rev_layers=n_layer
 )
