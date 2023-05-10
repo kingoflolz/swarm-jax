@@ -15,7 +15,7 @@ from .swarm_layer import save_checkpoint, load_checkpoint, opt_state, run_thread
     quantize, dequantize, init_fn
 
 
-@ray.remote(resources={"tpu": 1})
+@ray.remote
 class ReversibleLayer(object):
     def __init__(
             self,
@@ -76,7 +76,7 @@ class ReversibleLayer(object):
             _, vjpfun = jax.vjp(self.forward_fn.apply, params, None, reconstr_x)
             weights_grad, _, x_grad = vjpfun(dy)
 
-            new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
+            new_acc = jax.tree_map(operator.add, acc, weights_grad)
             return (reconstr_x, x_grad), new_acc
 
         self.state = init_fn(master_rng, jnp.zeros_like(data), self.forward_fn.init, optimizer)

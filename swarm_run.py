@@ -16,7 +16,7 @@ import optax
 
 ray.init(resources={"tpu": 999})  # pretend we have infinite tpus lol
 
-train_dataset = TextLoader("data/enwik8", batchsize=(1, 16), sample_size=128, length=90000000)
+train_dataset = TextLoader("data/enwik8", batchsize=(8, 16), sample_size=128, length=90000000)
 
 optimizer = optax.chain(
     optax.clip_by_global_norm(0.25),

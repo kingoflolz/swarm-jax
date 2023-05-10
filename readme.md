@@ -22,3 +22,10 @@ Look in `swarm_run.py` for an example of running a character transformer on enwi
 - [ ] Handle unbalanced and unreliable nodes (layerdrop)
 - [ ] Dynamic node addition
 - [ ] 1T or bust?
+
+# To debug
+```bash
+export RAY_BACKEND_LOG_LEVEL=debug
+export TF_CPP_MIN_LOG_LEVEL=0
+export JAX_PLATFORMS=''
+```

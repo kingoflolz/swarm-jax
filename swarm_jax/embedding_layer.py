@@ -24,7 +24,7 @@ def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:
                         name=name)(x)
 
 
-@ray.remote(resources={"tpu": 1})
+@ray.remote
 class EmbeddingLayer(object):
     def __init__(self, obs, vocab: int, d_model: int, optimizer: optax.GradientTransformation,
                  precision: NetworkPrecision):
@@ -66,7 +66,7 @@ class EmbeddingLayer(object):
             cos_err = jnp.abs(1.0 - jnp.dot(y_new.flatten(), y.flatten()) / (
                     jnp.linalg.norm(y.flatten()) * jnp.linalg.norm(y_new.flatten())))
 
-            new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
+            new_acc = jax.tree_map(operator.add, acc, weights_grad)
             return diff, cos_err, new_acc
 
         # we call all the functions here to trigger jit at init
@@ -139,7 +139,7 @@ class EmbeddingLayer(object):
             return True
 
 
-@ray.remote(resources={"tpu": 1})
+@ray.remote
 class ProjLayer(object):
     def __init__(self, data, vocab: int, d_model: int, optimizer: optax.GradientTransformation, loss_scale: float,
                  precision: NetworkPrecision):
@@ -183,7 +183,7 @@ class ProjLayer(object):
             loss, vjpfun = jax.vjp(self.proj_loss_fn.apply, params, None, hidden, target)
             weights_grad, _, x_grad, _ = vjpfun(np.ones((), dtype=hidden.dtype))
 
-            new_acc = jax.tree_multimap(operator.add, acc, weights_grad)
+            new_acc = jax.tree_map(operator.add, acc, weights_grad)
             return hidden, x_grad, loss, new_acc
 
         # we call all the functions here to trigger jit at init
