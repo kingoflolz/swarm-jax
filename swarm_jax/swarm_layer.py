@@ -75,7 +75,7 @@ def init_fn(master_rng, data, init_fn, optimizer):
     out_rng, init_rng = jax.random.split(master_rng)
 
     # copy the same initial params to each accelerator
-    init_rng = jnp.broadcast_to(init_rng, (jax.local_device_count(),) + init_rng.shape)
+    init_rng = jnp.broadcast_to(init_rng, (8,) + init_rng.shape)
     params = jax.pmap(init_fn)(init_rng, data)
 
     cpu_device = jax.devices("cpu")[0]

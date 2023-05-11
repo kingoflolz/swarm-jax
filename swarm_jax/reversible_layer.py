@@ -79,6 +79,9 @@ class ReversibleLayer(object):
             new_acc = jax.tree_map(operator.add, acc, weights_grad)
             return (reconstr_x, x_grad), new_acc
 
+        shape = (8, 16, 128, 2)
+        random_array = jax.random.uniform(master_rng, shape=shape, dtype=jnp.float32)
+
         self.state = init_fn(master_rng, jnp.zeros_like(data), self.forward_fn.init, optimizer)
         num_params = hk.data_structures.tree_size(self.state["params"])
         print(f'Param count = {num_params}')

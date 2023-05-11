@@ -186,6 +186,8 @@ class ProjLayer(object):
             new_acc = jax.tree_map(operator.add, acc, weights_grad)
             return hidden, x_grad, loss, new_acc
 
+        shape = (8, 16, 128, 2)
+        random_array = jax.random.uniform(master_rng, shape=shape, dtype=jnp.float32)
         # we call all the functions here to trigger jit at init
         self.state = init_fn(master_rng, data, self.proj_fwd_fn.init, optimizer)
 
