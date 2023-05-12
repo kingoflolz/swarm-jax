@@ -37,7 +37,7 @@ def create_tpu(
     data = {"accelerator_type":
                 type,
             "runtime_version":
-                'v2-alpha',
+                'tpu-vm-tf-2.10.0-v4',
             "network_config":
                 {"enable_external_ips": True},
             }
@@ -45,7 +45,7 @@ def create_tpu(
     if preemptible:
         data["schedulingConfig"] = {"preemptible": True}
 
-    response = requests.post(f'https://tpu.googleapis.com/v2alpha1/projects/{get_project()}/locations/{zone}/nodes',
+    response = requests.post(f'https://tpu.googleapis.com/v2/projects/{get_project()}/locations/{zone}/nodes',
                              headers=headers, params=params, json=data)
 
     print(response.json())
@@ -59,7 +59,7 @@ def check_tpu(name, zone):
     }
 
     response = requests.get(
-        f'https://tpu.googleapis.com/v2alpha1/projects/{get_project()}/locations/{zone}/nodes/{name}',
+        f'https://tpu.googleapis.com/v2/projects/{get_project()}/locations/{zone}/nodes/{name}',
         headers=headers)
 
     return response.json()
@@ -71,7 +71,7 @@ def delete_tpu(name, zone):
     }
 
     response = requests.delete(
-        f'https://tpu.googleapis.com/v2alpha1/projects/{get_project()}/locations/{zone}/nodes/{name}',
+        f'https://tpu.googleapis.com/v2/projects/{get_project()}/locations/{zone}/nodes/{name}',
         headers=headers)
 
     return response.json()

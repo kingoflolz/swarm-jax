@@ -5,25 +5,25 @@ import optax
 import ray
 
 from loader import TextLoader
-from ray_tpu import start_ray, get_connection, create_tpu, wait_til
+from ray_tpu import start_ray, get_connection, create_tpu, wait_til, delete_tpu
 from swarm_jax.model import SwarmCharTransformerBig
 from swarm_jax.swarm import Swarm
 from swarm_jax.swarm_layer import NetworkPrecision
 
-tpus = 8
+tpus = 1
+region = "us-central1-f"
 
 # for i in range(tpus):
-#     delete_tpu(f"swarm-jax-test-{i}", "europe-west4-a")
+#     delete_tpu(f"swarm-jax-test-{i}", region)
 #
 # exit()
 
 head_info = ray.init(dashboard_host="0.0.0.0")
 address = head_info['redis_address']
-region = "us-central1-f"
 
 conns = []
 for i in range(tpus):
-    create_tpu(f"swarm-jax-test-{i}", region, "v3-8", False)
+    create_tpu(f"swarm-jax-test-{i}", region, "v2-8", False)
 
 for i in range(tpus):
     assert wait_til(f"swarm-jax-test-{i}", region, {'state': 'READY', 'health': 'HEALTHY'})

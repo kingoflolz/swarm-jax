@@ -26,7 +26,8 @@ class MultiHeadAttentionFixed(hk.Module):
         self.key_size = key_size
         self.query_size = query_size or key_size
         self.value_size = value_size or key_size
-        self.model_size = model_size or key_size * num_heads
+        # self.model_size = model_size or key_size * num_heads
+        self.model_size = model_size or 256
         self.w_init = hk.initializers.VarianceScaling(w_init_scale)
 
     def __call__(

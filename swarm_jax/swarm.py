@@ -1,3 +1,4 @@
+from datetime import datetime
 from multiprocessing.pool import ThreadPool
 
 import numpy as np
@@ -52,6 +53,7 @@ class Swarm:
         self.all_layers = [self.embedding] + self.layers + [self.proj]
 
     def run(self, epochs, log_path, ckpt_path):
+        job_start = datetime.now()
         assert ray.is_initialized()  # needs a valid ray cluster
         writer = SummaryWriter(log_path, flush_secs=5)
 
@@ -61,6 +63,7 @@ class Swarm:
         pool = ThreadPool(16)  # have max 16 concurrent examples in the network
 
         for e in range(epochs):
+            start = datetime.now()
             if e % 5000 == 0:
                 ckpt_saves = [layer.save.remote(f"{ckpt_path}/{i}/", e) for i, layer in enumerate(self.all_layers)]
                 ray.wait(ckpt_saves, num_returns=len(ckpt_saves))
@@ -82,7 +85,8 @@ class Swarm:
             writer.add_scalar("loss", loss / self.loss_scale, e)
             writer.add_scalar("reconstruction_error", error, e)
             writer.add_scalar("reconstruction_cos_error", cos_err, e)
-            print(e, loss / self.loss_scale)
+            end = datetime.now()
+            print(f"EPOCH: {e} \t Loss scale: {self.loss_scale} \t Epoch Runtime: { end - start } \t Total Runtime: { end - job_start }")
 
 
 # take a training example and shoves it through forward and backward of all layers
